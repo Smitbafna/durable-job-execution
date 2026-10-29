@@ -194,11 +194,18 @@ export class WebRTCOrchestrator {
       this.render();
       return;
     }
-    if (!this.peer) {
-      this.peer = new Peer("worker", this.clientId, this.createConnection, this.peerEvents);
+    // A fresh inbound offer supersedes any prior peer on this side. The browser
+    // RTCPeerConnection rejects `setRemoteDescription` once a remote description
+    // already exists, so reusing the live peer would leave the negotiation broken
+    // (e.g. when a coordinator reloads and reconnects to a worker that is still
+    // connected). Tear the old peer down first, then accept the new offer.
+    if (this.peer) {
+      this.teardownPeer();
     }
+    this.peer = new Peer("worker", this.clientId, this.createConnection, this.peerEvents);
     this.state.peerConnectionState = "connecting";
     this.state.dataChannelState = "connecting";
+    this.state.error = null;
     this.render();
     void this.peer.handleOffer(fromClientId, sdp).catch((e: unknown) => this.reportPeerError(e));
   }

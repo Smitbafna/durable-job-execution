@@ -57,6 +57,10 @@ export function createServer(options: ServerOptions = {}): SignalingServer {
   const wss = new WebSocketServer({ server, path: "/ws" });
 
   wss.on("connection", (ws: WebSocket) => {
+    if (process.env.SIGNALING_DEBUG) {
+      // eslint-disable-next-line no-console
+      console.log("[signaling] socket connected");
+    }
     ws.on("message", (data: unknown) => {
       let parsed: unknown;
       try {

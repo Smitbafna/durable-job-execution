@@ -107,6 +107,16 @@ export class SignalingHub {
     this.send(ws, buildPayload(MessageType.Error, { code, message }));
   }
 
+  /** Lightweight tracing for the dev/demo server (enabled via SIGNALING_DEBUG).
+   * Does not touch the wire protocol — only prints hub activity so the
+   * registration/offer/ICE/disconnect flow is observable while debugging. */
+  private debug(msg: string): void {
+    if (process.env.SIGNALING_DEBUG) {
+      // eslint-disable-next-line no-console
+      console.log(`[signaling] ${msg}`);
+    }
+  }
+
   /**
    * Runs the registration handshake for `ws`. Sends a `REGISTRATION_SUCCESS`
    * on success or an `ERROR` on failure. Returns `true` on success.
@@ -144,6 +154,7 @@ export class SignalingHub {
     } else if (role === "worker") {
       this.notifyCoordinators();
     }
+    this.debug(`client ${clientId} registered as ${role}`);
     return true;
   }
 
@@ -246,6 +257,7 @@ export class SignalingHub {
     const forwarded = { ...(message as object) } as { [k: string]: unknown };
     forwarded.senderId = sender.clientId;
     this.send(recipient.ws, forwarded);
+    this.debug(`${String(m.type)} ${sender.clientId} -> ${String(m.receiverId)}`);
   }
 
   private handleGracefulDisconnect(client: RegisteredClient, message: unknown): void {
@@ -288,6 +300,7 @@ export class SignalingHub {
     if (current?.role === "worker") {
       this.notifyCoordinators();
     }
+    this.debug(`client ${clientId} disconnected`);
   }
 
   /** Forcefully closes every connected socket (e.g. on server shutdown). */

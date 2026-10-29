@@ -145,6 +145,27 @@ describe("orchestrator", () => {
     expect(workerPc[0].candidates[0].candidate).toBe("cand-1");
   });
 
+  it("gives the worker a fresh peer when it receives a second offer", async () => {
+    const { coord, worker, coordT, workerPc } = makePair();
+    await connectBoth(coord, worker);
+    coordT.emit(regSuccess(COORD_ID, "coordinator"));
+
+    // First offer -> the worker builds its first Peer.
+    coord.connectTo(WORKER_ID);
+    await flush(3);
+    expect(workerPc.length).toBe(1);
+
+    // Second offer (coordinator re-initiates, e.g. after a reload) -> the worker
+    // must discard the prior connection rather than call setRemoteDescription on
+    // an already-described peer connection (which the browser rejects).
+    coord.connectTo(WORKER_ID);
+    await flush(3);
+    expect(workerPc.length).toBe(2);
+    expect(workerPc[0].closed).toBe(true);
+    // The second offer must be applied to the fresh pc, not the torn-down one.
+    expect(workerPc[1].remoteDesc?.type).toBe("offer");
+  });
+
   it("tears down the peer and stops the socket on disconnect", async () => {
     const { coord, worker, coordT } = makePair();
     await connectBoth(coord, worker);
