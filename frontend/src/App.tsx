@@ -149,12 +149,12 @@ export default function App() {
         <h2>Say hello</h2>
         <form onSubmit={onSend} className="row">
           <input
-            value={draft || suggested}
+            value={draft}
             onChange={(e) => setDraft(e.target.value)}
             placeholder={suggested || "type a message"}
             disabled={!peerReady}
           />
-          <button type="submit" disabled={!peerReady}>
+          <button type="submit" disabled={!peerReady || !draft.trim()}>
             Send
           </button>
         </form>
