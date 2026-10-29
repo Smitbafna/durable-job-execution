@@ -1,0 +1,44 @@
+/* ResumeDrop — minimal base styles. The UI is intentionally small so the
+   signaling / peer state is easy to read in the browser devtools. */
+:root {
+  --fg: #0f172a;
+  --muted: #64748a;
+  --bg: #f8fafc;
+  --panel: #ffffff;
+  --border: #e2e8f0;
+  --accent: #2563eb;
+  --accent-ink: #ffffff;
+  --open: #16a34a;
+  --warn: #b45309;
+  --bad: #b91c1c;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: #e2e8f0;
+    --muted: #94a3b8;
+    --bg: #0f172a;
+    --panel: #1e293b;
+    --border: #334155;
+    --accent: #60a5fa;
+  }
+}
+* {
+  box-sizing: border-box;
+}
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  font-family: ui-serif, Georgia, "Times New Roman", serif;
+  background: var(--bg);
+  color: var(--fg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+body {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}

@@ -1,0 +1,28 @@
+{
+  "name": "resumedrop",
+  "private": true,
+  "type": "module",
+  "version": "0.0.1",
+  "description": "ResumeDrop - reliable WebRTC foundation (Milestone 01)",
+  "license": "MIT",
+  "workspaces": [
+    "shared/",
+    "signaling-server/",
+    "frontend/"
+  ],
+  "scripts": {
+    "dev": "npm run -w shared build && npm run -w frontend dev & npm run -w signaling-server dev",
+    "dev:frontend": "npm run -w frontend dev",
+    "dev:server": "npm run -w signaling-server dev",
+    "build": "npm run -w shared build && npm run -w signaling-server build && npm run -w frontend build",
+    "typecheck": "npm run -w shared build && npm run -w shared typecheck && npm run -w signaling-server typecheck && npm run -w frontend typecheck",
+    "test": "npm run -w shared build && npm run -w shared test && npm run -w signaling-server test && npm run -w frontend test",
+    "test:e2e": "npm run -w shared build && playwright test",
+    "test:e2e:ui": "npm run -w shared build && playwright test --headed",
+    "start": "npm run -w shared build && npm run -w signaling-server start",
+    "smoke": "npm run -w shared build && tsx smoke_frontend.ts"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.1"
+  }
+}

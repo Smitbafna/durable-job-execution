@@ -1,0 +1,19 @@
+{
+  "name": "@resumedrop/shared",
+  "private": true,
+  "version": "0.0.1",
+  "description": "ResumeDrop shared protocol types and runtime validators",
+  "license": "MIT",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  }
+}
