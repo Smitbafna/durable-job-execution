@@ -40,6 +40,9 @@ export type ValidatedPayload = SumNumbersPayload;
 /** Result type produced by all known job types (union, extensible). */
 export type JobResult = SumNumbersResult;
 
+/** Dispatch type for a job handler: turns a (already validated) payload into a result. */
+export type JobHandler = (payload: unknown) => JobResult | Promise<JobResult>;
+
 export const MAX_NUMBERS = 100_000;
 
 export interface JobTypeDefinition {

@@ -17,6 +17,17 @@ export interface DatabaseConfig {
   readonly connectionTimeoutMillis: number;
 }
 
+import { randomUUID } from "node:crypto";
+
+export interface WorkerConfig {
+  // Unique identifier for this worker process (generated per launch if unset).
+  readonly workerId: string;
+  // How often the worker polls PostgreSQL for the next queued job.
+  readonly pollIntervalMs: number;
+  // Number of jobs executed concurrently within this worker process.
+  readonly concurrency: number;
+}
+
 export interface ServerConfig {
   readonly port: number;
   readonly db: DatabaseConfig;
@@ -63,6 +74,14 @@ export function loadDatabaseConfig(): DatabaseConfig {
     password,
     ssl: (process.env.DB_SSL ?? "false").toLowerCase() === "true",
     connectionTimeoutMillis: asInt(process.env.DB_CONNECT_TIMEOUT_MS, 3000),
+  };
+}
+
+export function loadWorkerConfig(): WorkerConfig {
+  return {
+    workerId: process.env.WORKER_ID ?? randomUUID(),
+    pollIntervalMs: asInt(process.env.WORKER_POLL_INTERVAL_MS, 1000),
+    concurrency: asInt(process.env.WORKER_CONCURRENCY, 5),
   };
 }
 
