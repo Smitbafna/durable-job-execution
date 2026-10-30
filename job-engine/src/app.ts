@@ -32,6 +32,12 @@ export function createApp(opts: CreateAppOptions = {}): AppContainer {
   app.use(express.json({ limit: "1mb", strict: true }));
 
   const pool = opts.pool ?? getPool();
+  // A dropped connection (e.g. the database restarting) makes pg.Pool emit an
+  // 'error' event on its idle clients. With no listener that is fatal to the
+  // process — which would defeat /health's per-request availability check — so we
+  // attach a handler that keeps the process alive and logs server-side only.
+  // eslint-disable-next-line no-console
+  pool.on("error", (err) => console.error("[job-engine] database pool error:", err));
   const repository = new JobRepository(pool);
   const service = new JobService(repository);
 

@@ -8,11 +8,11 @@
   "types": "dist/index.d.ts",
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "node --env-file=.env --import tsx --watch src/index.ts",
     "build": "tsc",
     "typecheck": "tsc --noEmit -p tsconfig.test.json",
     "start": "node dist/index.js",
-    "migrate": "tsx src/db/migrate.cli.ts",
+    "migrate": "node --env-file=.env --import tsx src/db/migrate.cli.ts",
     "test:unit": "vitest run",
     "test:integration": "docker compose up -d && vitest run -c vitest.integration.config.ts",
     "test": "npm run test:unit && npm run test:integration"
