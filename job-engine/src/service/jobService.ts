@@ -1,48 +1,66 @@
-/**
- * Job Engine — application service (use cases).
- *
- * Orchestrates validation and persistence without performing any job execution.
- * The only thing a submitted job ever is, in Week 1, a persisted `queued` record.
- */
-
 import { randomUUID } from "node:crypto";
-import { AppError } from "../errors.js";
+import { AppError, AppErrorCode } from "../errors.js";
 import { describeJobType } from "../domain/jobTypes.js";
 import type { JobType, ValidatedPayload } from "../domain/jobTypes.js";
 import { JobStatus, type Job } from "../domain/job.js";
 import { JobRepository, type CreateJobInput } from "../db/repository.js";
+import { ArtifactRepository } from "../db/artifactRepository.js";
+import { validateExecutionSpec } from "../domain/executionSpec.js";
+import type { ExecutionLimits } from "../domain/executionSpec.js";
+import { DEFAULT_EXECUTION_LIMITS } from "../domain/executionSpec.js";
 
 export interface SubmitJobCommand {
-  readonly type: string; // untrusted; validated here
+  readonly type: string;
   readonly payload: unknown;
 }
 
 export class JobService {
-  constructor(private readonly repo: JobRepository) {}
+  constructor(
+    private readonly repo: JobRepository,
+    private readonly artifactRepo?: ArtifactRepository,
+    private readonly executionLimits: ExecutionLimits = DEFAULT_EXECUTION_LIMITS,
+  ) {}
 
-  /**
-   * Validates the request (supported type + per-type payload) and persists a
-   * new `queued` job. The generated id is a v4 UUID. The job is durable after
-   * this returns — **no execution happens here** (Week 2 adds the worker).
-   */
   async submitJob(cmd: SubmitJobCommand): Promise<Job> {
-    const def = describeJobType(cmd.type); // throws UnsupportedJobType (400)
-    const validated = def.validatePayload(cmd.payload);
+    const def = describeJobType(cmd.type);
+    let validated: ValidatedPayload | AppError;
+    if (cmd.type === "execute_artifact") {
+      validated = validateExecutionSpec(cmd.payload, this.executionLimits);
+    } else {
+      validated = def.validatePayload(cmd.payload);
+    }
     if (validated instanceof AppError) {
-      throw validated; // 400 ValidationError
+      throw validated;
     }
     const payload: ValidatedPayload = validated;
+
+    if (cmd.type === "execute_artifact") {
+      if (!this.artifactRepo) {
+        throw new AppError(
+          AppErrorCode.Internal,
+          503,
+          "Artifact repository unavailable",
+        );
+      }
+      const spec = validated as { artifactId: string };
+      const artifact = await this.artifactRepo.getArtifactById(spec.artifactId);
+      if (artifact === null) {
+        throw new AppError(
+          AppErrorCode.ValidationError,
+          400,
+          `Unknown artifact: ${spec.artifactId}`,
+        );
+      }
+    }
 
     const id = randomUUID();
     const input: CreateJobInput = { id, type: cmd.type as JobType, payload };
     return this.repo.createJob(input);
   }
 
-  /** Retrieves a job by id. Missing ids resolve to `null` (route maps to 404). */
   async getJob(id: string): Promise<Job | null> {
     return this.repo.getJobById(id);
   }
 
-  /** The only status a freshly created job ever has in Week 1. */
   static readonly INITIAL_STATUS: JobStatus = JobStatus.Queued;
 }

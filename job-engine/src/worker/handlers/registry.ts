@@ -16,7 +16,7 @@ import { sumNumbersHandler } from "./sumNumbersHandler.js";
 
 /** The handler that executes a validated payload for a given job type. */
 /** The complete set of job types that this engine can execute. */
-export const HANDLER_REGISTRY: Readonly<Record<JobType, JobHandler>> = {
+export const HANDLER_REGISTRY: Readonly<Partial<Record<JobType, JobHandler>>> = {
   sum_numbers: sumNumbersHandler({}),
 };
 

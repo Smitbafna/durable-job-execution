@@ -85,6 +85,23 @@ export class LocalArtifactStorage implements ArtifactStorage {
     }
   }
 
+  async materialize(storageKey: string, destinationPath: string): Promise<void> {
+    const source = this.resolvePath(storageKey);
+    try {
+      await fs.copyFile(source, destinationPath);
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException)?.code;
+      if (code === "ENOENT") {
+        throw new AppError(
+          AppErrorCode.NotFound,
+          404,
+          "Artifact backing file not found",
+        );
+      }
+      throw new Error(`Failed to materialize artifact: ${(e as Error).message}`);
+    }
+  }
+
   async delete(storageKey: string): Promise<void> {
     const full = this.resolvePath(storageKey);
     try {

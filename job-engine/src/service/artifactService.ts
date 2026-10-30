@@ -85,4 +85,12 @@ export class ArtifactService {
   async getArtifact(id: string): Promise<Artifact | null> {
     return this.repo.getArtifactById(id);
   }
+
+  async materializeArtifact(id: string, destinationPath: string): Promise<void> {
+    const artifact = await this.repo.getArtifactById(id);
+    if (artifact === null) {
+      throw new AppError(AppErrorCode.NotFound, 404, `Artifact not found: ${id}`);
+    }
+    await this.storage.materialize(artifact.storageKey, destinationPath);
+  }
 }

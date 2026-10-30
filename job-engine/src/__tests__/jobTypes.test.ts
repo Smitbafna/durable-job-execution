@@ -11,7 +11,7 @@ import { AppError, AppErrorCode } from "../errors.js";
 
 describe("job types", () => {
   it("supports exactly sum_numbers in Week 1", () => {
-    expect(SUPPORTED_JOB_TYPES).toEqual(["sum_numbers"]);
+    expect(SUPPORTED_JOB_TYPES).toEqual(["sum_numbers", "execute_artifact"]);
   });
 
   it("isSupportedJobType accepts supported and rejects unknown", () => {

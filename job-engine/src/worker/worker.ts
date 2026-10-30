@@ -13,11 +13,19 @@
  */
 
 import { Pool } from "pg";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { JobRepository } from "../db/repository.js";
 import type { Job } from "../domain/job.js";
 import { lookupHandler } from "./handlers/registry.js";
 import { AppError, AppErrorCode } from "../errors.js";
 import type { WorkerConfig } from "../config.js";
+import type { ArtifactService } from "../service/artifactService.js";
+import { RuntimeRegistry, PlaceholderRuntime } from "../runtime/executionRuntime.js";
+import { validateExecutionSpec } from "../domain/executionSpec.js";
+import type { ExecutionLimits } from "../domain/executionSpec.js";
+import { DEFAULT_EXECUTION_LIMITS } from "../domain/executionSpec.js";
 
 export interface WorkerLogger {
   info(message: string, context?: unknown): void;
@@ -28,14 +36,34 @@ export interface WorkerLogger {
 export class Worker {
   private readonly loops: Promise<void>[] = [];
   private stopping = false;
+  private runtimeRegistry?: RuntimeRegistry;
+  private artifactService?: ArtifactService;
+  private executionLimits: ExecutionLimits = DEFAULT_EXECUTION_LIMITS;
+
   constructor(
     private readonly config: WorkerConfig,
     private readonly logger: WorkerLogger,
     private readonly repo: JobRepository,
     private readonly pool?: Pool,
+    runtimeRegistryOrOptions?: RuntimeRegistry | {
+      runtimeRegistry?: RuntimeRegistry;
+      artifactService?: ArtifactService;
+      executionLimits?: ExecutionLimits;
+    },
+    artifactService?: ArtifactService,
+    executionLimits?: ExecutionLimits,
   ) {
-    // The pool parameter is injected for tests so each worker slot owns its
-    // own database connection; in production the singleton pool is used.
+    if (runtimeRegistryOrOptions instanceof RuntimeRegistry) {
+      this.runtimeRegistry = runtimeRegistryOrOptions;
+      this.artifactService = artifactService;
+      this.executionLimits = executionLimits ?? DEFAULT_EXECUTION_LIMITS;
+    } else if (runtimeRegistryOrOptions) {
+      this.runtimeRegistry = runtimeRegistryOrOptions.runtimeRegistry;
+      this.artifactService =
+        runtimeRegistryOrOptions.artifactService ?? artifactService;
+      this.executionLimits =
+        runtimeRegistryOrOptions.executionLimits ?? executionLimits ?? DEFAULT_EXECUTION_LIMITS;
+    }
   }
 
 
@@ -109,6 +137,10 @@ export class Worker {
   }
 
   private async executeJob(job: Job): Promise<void> {
+    if (job.type === "execute_artifact") {
+      await this.executeArtifactJob(job);
+      return;
+    }
     const handler = lookupHandler(job.type);
 
     if (!handler) {
@@ -158,6 +190,75 @@ export class Worker {
    * `running` — it was already completed, terminal, or picked up by another
    * worker. This is a consistency/log event, not a fatal error.
    */
+  private async executeArtifactJob(job: Job): Promise<void> {
+    const specResult = validateExecutionSpec(job.payload, this.executionLimits);
+    if (specResult instanceof AppError) {
+      const affected = await this.repo.markFailed(job.id, {
+        code: specResult.code,
+        message: specResult.message,
+      });
+      this.maybeLogConsistencyError("markFailed", job.id, affected);
+      return;
+    }
+
+    const spec = specResult;
+    const runtime = this.runtimeRegistry?.resolve(spec.runtime);
+    if (!runtime) {
+      const affected = await this.repo.markFailed(job.id, {
+        code: AppErrorCode.UnsupportedJobType,
+        message: `Unsupported runtime: ${spec.runtime}`,
+      });
+      this.maybeLogConsistencyError("markFailed", job.id, affected);
+      return;
+    }
+
+    if (!this.artifactService) {
+      const affected = await this.repo.markFailed(job.id, {
+        code: AppErrorCode.Internal,
+        message: "Artifact service unavailable",
+      });
+      this.maybeLogConsistencyError("markFailed", job.id, affected);
+      return;
+    }
+
+    const artifact = await this.artifactService.getArtifact(spec.artifactId);
+    if (artifact === null) {
+      const affected = await this.repo.markFailed(job.id, {
+        code: AppErrorCode.NotFound,
+        message: `Artifact not found: ${spec.artifactId}`,
+      });
+      this.maybeLogConsistencyError("markFailed", job.id, affected);
+      return;
+    }
+
+    let tempDir: string | undefined;
+    try {
+      tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "job-engine-artifact-"));
+      const artifactPath = path.join(tempDir, "artifact.zip");
+      await this.artifactService.materializeArtifact(spec.artifactId, artifactPath);
+      const result = await runtime.execute(spec, artifactPath);
+      const affected = await this.repo.markSucceeded(job.id, result);
+      this.maybeLogConsistencyError("markSucceeded", job.id, affected);
+    } catch (err) {
+      const appError = err instanceof AppError ? err : this.sanitizeError(err);
+      this.logger.error(
+        `Job id ${job.id} (execute_artifact) failed; persisting error.`,
+        { jobId: job.id, type: job.type, code: appError.code },
+        err,
+      );
+      const affected = await this.repo.markFailed(job.id, {
+        code: appError.code,
+        message: appError.message,
+        details: appError.details,
+      });
+      this.maybeLogConsistencyError("markFailed", job.id, affected);
+    } finally {
+      if (tempDir) {
+        await fs.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+      }
+    }
+  }
+
   private maybeLogConsistencyError(
     op: string,
     jobId: string,

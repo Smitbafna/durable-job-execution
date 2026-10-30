@@ -8,9 +8,14 @@
  */
 
 import { AppError, AppErrorCode } from "../errors.js";
+import {
+  validateExecutionSpec,
+  type ExecutionSpec,
+  DEFAULT_EXECUTION_LIMITS,
+} from "./executionSpec.js";
 
 /** The one job type supported in Week 1. Extended in later milestones. */
-export const SUPPORTED_JOB_TYPES = ["sum_numbers"] as const;
+export const SUPPORTED_JOB_TYPES = ["sum_numbers", "execute_artifact"] as const;
 export type JobType = (typeof SUPPORTED_JOB_TYPES)[number];
 
 /**
@@ -35,7 +40,7 @@ export interface SumNumbersResult {
 }
 
 /** Payload type validated for all known job types (union, extensible). */
-export type ValidatedPayload = SumNumbersPayload;
+export type ValidatedPayload = SumNumbersPayload | ExecutionSpec;
 
 /** Result type produced by all known job types (union, extensible). */
 export type JobResult = SumNumbersResult;
@@ -61,8 +66,17 @@ export const SUM_NUMBERS_TYPE: JobTypeDefinition = {
   validatePayload: validateSumNumbersPayload,
 } as const;
 
+export const EXECUTE_ARTIFACT_TYPE: JobTypeDefinition = {
+  type: "execute_artifact",
+  name: "Execute Artifact",
+  resultShape: "{ exitCode, stdout, stderr, durationMs }",
+  validatePayload: (payload: unknown) =>
+    validateExecutionSpec(payload, DEFAULT_EXECUTION_LIMITS),
+} as const;
+
 export const JOB_TYPES: Readonly<Record<JobType, JobTypeDefinition>> = {
   sum_numbers: SUM_NUMBERS_TYPE,
+  execute_artifact: EXECUTE_ARTIFACT_TYPE,
 } as const;
 
 /**

@@ -15,6 +15,12 @@ import path from "node:path";
 import { getPool, closePool } from "../db/pool.js";
 import { runMigrations } from "../db/migrate.js";
 import { JobRepository } from "../db/repository.js";
+import { ArtifactRepository } from "../db/artifactRepository.js";
+import { ArtifactService } from "../service/artifactService.js";
+import { LocalArtifactStorage } from "../storage/localArtifactStorage.js";
+import { loadArtifactConfig, loadDockerConfig, loadExecutionConfig } from "../config.js";
+import { RuntimeRegistry } from "../runtime/executionRuntime.js";
+import { DockerRuntime } from "../runtime/dockerRuntime.js";
 import { Worker, type WorkerLogger } from "./worker.js";
 import { loadWorkerConfig } from "../config.js";
 
@@ -53,7 +59,36 @@ async function main(): Promise<void> {
   logger().info("worker started", { workerId: config.workerId });
 
   const repository = new JobRepository(pool);
-  const worker = new Worker(config, logger(), repository, pool);
+  const artifactConfig = loadArtifactConfig();
+  const artifactStorage = new LocalArtifactStorage(artifactConfig.storageDir);
+  const artifactRepository = new ArtifactRepository(pool);
+  const artifactService = new ArtifactService(
+    artifactRepository,
+    artifactStorage,
+    artifactConfig,
+  );
+  const runtimeRegistry = new RuntimeRegistry();
+  runtimeRegistry.register(
+    "python:3.12",
+    new DockerRuntime(artifactConfig, loadDockerConfig(), loadExecutionConfig()),
+  );
+  const executionConfig = loadExecutionConfig();
+  const worker = new Worker(
+    config,
+    logger(),
+    repository,
+    pool,
+    runtimeRegistry,
+    artifactService,
+    {
+      maxCpu: executionConfig.maxCpu,
+      maxMemoryMb: executionConfig.maxMemoryMb,
+      maxTimeoutSeconds: executionConfig.maxTimeoutSeconds,
+      maxCommandLength: executionConfig.maxCommandLength,
+      maxInputJsonBytes: executionConfig.maxInputJsonBytes,
+      maxInputDepth: executionConfig.maxInputDepth,
+    },
+  );
 
   const quit = async (signal: string): Promise<void> => {
     logger().info("shutdown signal received", { signal });

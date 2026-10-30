@@ -36,10 +36,28 @@ export interface ArtifactConfig {
   readonly maxIndividualUncompressedBytes: number;
 }
 
+export interface ExecutionConfig {
+  readonly maxCpu: number;
+  readonly maxMemoryMb: number;
+  readonly maxTimeoutSeconds: number;
+  readonly maxCommandLength: number;
+  readonly maxInputJsonBytes: number;
+  readonly maxInputDepth: number;
+}
+
+export interface DockerConfig {
+  readonly image: string;
+  readonly pidLimit: number;
+  readonly maxOutputBytes: number;
+  readonly tmpfsSizeMb: number;
+}
+
 export interface ServerConfig {
   readonly port: number;
   readonly db: DatabaseConfig;
   readonly artifacts: ArtifactConfig;
+  readonly execution: ExecutionConfig;
+  readonly docker: DockerConfig;
 }
 
 function asPort(value: string | undefined, fallback: number): number {
@@ -132,10 +150,32 @@ export function loadArtifactConfig(): ArtifactConfig {
   };
 }
 
+export function loadExecutionConfig(): ExecutionConfig {
+  return {
+    maxCpu: asPositiveInt(process.env.EXECUTION_MAX_CPU, 4, "EXECUTION_MAX_CPU"),
+    maxMemoryMb: asPositiveInt(process.env.EXECUTION_MAX_MEMORY_MB, 1024, "EXECUTION_MAX_MEMORY_MB"),
+    maxTimeoutSeconds: asPositiveInt(process.env.EXECUTION_MAX_TIMEOUT_SECONDS, 300, "EXECUTION_MAX_TIMEOUT_SECONDS"),
+    maxCommandLength: asPositiveInt(process.env.EXECUTION_MAX_COMMAND_LENGTH, 64, "EXECUTION_MAX_COMMAND_LENGTH"),
+    maxInputJsonBytes: asPositiveInt(process.env.EXECUTION_MAX_INPUT_JSON_BYTES, 65536, "EXECUTION_MAX_INPUT_JSON_BYTES"),
+    maxInputDepth: asPositiveInt(process.env.EXECUTION_MAX_INPUT_DEPTH, 8, "EXECUTION_MAX_INPUT_DEPTH"),
+  };
+}
+
+export function loadDockerConfig(): DockerConfig {
+  return {
+    image: process.env.DOCKER_IMAGE ?? "python:3.12",
+    pidLimit: asPositiveInt(process.env.DOCKER_PID_LIMIT, 64, "DOCKER_PID_LIMIT"),
+    maxOutputBytes: asPositiveInt(process.env.DOCKER_MAX_OUTPUT_BYTES, 1024 * 1024, "DOCKER_MAX_OUTPUT_BYTES"),
+    tmpfsSizeMb: asPositiveInt(process.env.DOCKER_TMPFS_SIZE_MB, 64, "DOCKER_TMPFS_SIZE_MB"),
+  };
+}
+
 export function loadServerConfig(): ServerConfig {
   return {
     port: asPort(process.env.PORT, 4700),
     db: loadDatabaseConfig(),
     artifacts: loadArtifactConfig(),
+    execution: loadExecutionConfig(),
+    docker: loadDockerConfig(),
   };
 }

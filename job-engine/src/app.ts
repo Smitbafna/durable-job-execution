@@ -18,7 +18,7 @@ import { ArtifactRepository } from "./db/artifactRepository.js";
 import { ArtifactService } from "./service/artifactService.js";
 import { LocalArtifactStorage } from "./storage/localArtifactStorage.js";
 import type { ArtifactStorage } from "./storage/artifactStorage.js";
-import { loadArtifactConfig, type ArtifactConfig } from "./config.js";
+import { loadArtifactConfig, type ArtifactConfig, loadExecutionConfig, type ExecutionConfig } from "./config.js";
 import { artifactRoutes } from "./http/artifactRoutes.js";
 
 export interface CreateAppOptions {
@@ -28,6 +28,7 @@ export interface CreateAppOptions {
   readonly artifactStorage?: ArtifactStorage;
   /** Inject artifact configuration. Defaults to env-derived configuration. */
   readonly artifactConfig?: ArtifactConfig;
+  readonly executionConfig?: ExecutionConfig;
 }
 
 export interface AppContainer {
@@ -51,9 +52,6 @@ export function createApp(opts: CreateAppOptions = {}): AppContainer {
   // attach a handler that keeps the process alive and logs server-side only.
   // eslint-disable-next-line no-console
   pool.on("error", (err) => console.error("[job-engine] database pool error:", err));
-  const repository = new JobRepository(pool);
-  const service = new JobService(repository);
-
   const artifactConfig = opts.artifactConfig ?? loadArtifactConfig();
   const artifactStorage =
     opts.artifactStorage ?? new LocalArtifactStorage(artifactConfig.storageDir);
@@ -63,6 +61,10 @@ export function createApp(opts: CreateAppOptions = {}): AppContainer {
     artifactStorage,
     artifactConfig,
   );
+
+  const executionConfig = opts.executionConfig ?? loadExecutionConfig();
+  const repository = new JobRepository(pool);
+  const service = new JobService(repository, artifactRepository, executionConfig);
 
   /**
    * `/health` distinguishes process liveness from database readiness. The

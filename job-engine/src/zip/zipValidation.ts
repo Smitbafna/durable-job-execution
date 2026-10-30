@@ -21,7 +21,7 @@ function fail(message: string): never {
   throw new AppError(AppErrorCode.ValidationError, 400, message);
 }
 
-function isUnsafeEntryName(name: string): boolean {
+export function isUnsafeEntryName(name: string): boolean {
   if (typeof name !== "string" || name === "") return true;
   if (name.includes("\0")) return true;
   if (/^[a-zA-Z]:[\\/]/.test(name)) return true;
