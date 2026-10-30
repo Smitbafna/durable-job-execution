@@ -28,9 +28,18 @@ export interface WorkerConfig {
   readonly concurrency: number;
 }
 
+export interface ArtifactConfig {
+  readonly storageDir: string;
+  readonly maxCompressedBytes: number;
+  readonly maxEntries: number;
+  readonly maxTotalUncompressedBytes: number;
+  readonly maxIndividualUncompressedBytes: number;
+}
+
 export interface ServerConfig {
   readonly port: number;
   readonly db: DatabaseConfig;
+  readonly artifacts: ArtifactConfig;
 }
 
 function asPort(value: string | undefined, fallback: number): number {
@@ -47,6 +56,14 @@ function asInt(value: string | undefined, fallback: number): number {
   const n = Number(value);
   if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) {
     throw new Error(`Invalid integer env var: ${value}`);
+  }
+  return n;
+}
+
+function asPositiveInt(value: string | undefined, fallback: number, name: string): number {
+  const n = asInt(value, fallback);
+  if (n <= 0) {
+    throw new Error(`Invalid ${name}: must be a positive integer, got ${n}`);
   }
   return n;
 }
@@ -85,9 +102,40 @@ export function loadWorkerConfig(): WorkerConfig {
   };
 }
 
+export function loadArtifactConfig(): ArtifactConfig {
+  const storageDir = (process.env.ARTIFACT_STORAGE_DIR ?? "./data/artifacts").trim();
+  if (storageDir === "") {
+    throw new Error("ARTIFACT_STORAGE_DIR must not be empty");
+  }
+  return {
+    storageDir,
+    maxCompressedBytes: asPositiveInt(
+      process.env.ARTIFACT_MAX_COMPRESSED_BYTES,
+      10 * 1024 * 1024,
+      "ARTIFACT_MAX_COMPRESSED_BYTES",
+    ),
+    maxEntries: asPositiveInt(
+      process.env.ARTIFACT_MAX_ENTRIES,
+      1000,
+      "ARTIFACT_MAX_ENTRIES",
+    ),
+    maxTotalUncompressedBytes: asPositiveInt(
+      process.env.ARTIFACT_MAX_TOTAL_UNCOMPRESSED_BYTES,
+      100 * 1024 * 1024,
+      "ARTIFACT_MAX_TOTAL_UNCOMPRESSED_BYTES",
+    ),
+    maxIndividualUncompressedBytes: asPositiveInt(
+      process.env.ARTIFACT_MAX_INDIVIDUAL_UNCOMPRESSED_BYTES,
+      50 * 1024 * 1024,
+      "ARTIFACT_MAX_INDIVIDUAL_UNCOMPRESSED_BYTES",
+    ),
+  };
+}
+
 export function loadServerConfig(): ServerConfig {
   return {
     port: asPort(process.env.PORT, 4700),
     db: loadDatabaseConfig(),
+    artifacts: loadArtifactConfig(),
   };
 }

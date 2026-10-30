@@ -55,6 +55,11 @@ export async function truncateJobs(pool: Pool): Promise<void> {
   await pool.query("TRUNCATE TABLE jobs");
 }
 
+/** Removes all rows from `artifacts` (called between tests via the shared pool). */
+export async function truncateArtifacts(pool: Pool): Promise<void> {
+  await pool.query("TRUNCATE TABLE artifacts");
+}
+
 /** Builds a fresh app + pool for a test. The shared pool should be ended in `afterAll`. */
 export function createTestApp(): AppContainer {
   const pool = createTestPool();

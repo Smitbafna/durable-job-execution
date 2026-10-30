@@ -30,6 +30,8 @@ pnpm-debug.log*
 # Job Engine — local env & build/runtime artifacts (never commit secrets)
 job-engine/.env
 job-engine/.env.*
+# Artifact storage (never commit uploaded archives)
+job-engine/data
 job-engine/dist
 job-engine/test-results
 job-engine/coverage

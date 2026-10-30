@@ -15,6 +15,8 @@ export enum AppErrorCode {
   UnsupportedJobType = "UNSUPPORTED_JOB_TYPE",
   NotFound = "NOT_FOUND",
   Conflict = "CONFLICT",
+  PayloadTooLarge = "PAYLOAD_TOO_LARGE",
+  UnsupportedMediaType = "UNSUPPORTED_MEDIA_TYPE",
   DbError = "DB_ERROR",
   Internal = "INTERNAL_ERROR",
 }
@@ -48,6 +50,14 @@ export class AppError extends Error {
 
   static dbError(message: string): AppError {
     return new AppError(AppErrorCode.DbError, 503, message);
+  }
+
+  static payloadTooLarge(message: string, details?: unknown): AppError {
+    return new AppError(AppErrorCode.PayloadTooLarge, 413, message, details);
+  }
+
+  static unsupportedMediaType(message: string, details?: unknown): AppError {
+    return new AppError(AppErrorCode.UnsupportedMediaType, 415, message, details);
   }
 }
 
