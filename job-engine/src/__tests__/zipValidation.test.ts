@@ -105,3 +105,118 @@ describe("validateZipArchive", () => {
     await expect(validateZipArchive(buf, limits)).rejects.toBeInstanceOf(AppError);
   });
 });
+describe("validateZipArchive hardening", () => {
+  const limits = {
+    maxEntries: 10,
+    maxTotalUncompressedBytes: 1024,
+    maxIndividualUncompressedBytes: 512,
+  };
+
+  it("rejects truncated compressed stream", async () => {
+    const buf = await makeZip([{ name: "a.txt", content: "hello world" }]);
+    const truncated = buf.subarray(0, buf.length - 5);
+    await expect(validateZipArchive(truncated, limits)).rejects.toBeInstanceOf(AppError);
+  });
+
+  it("rejects malformed compressed data", async () => {
+    // A truncated compressed stream exercises the streaming failure path.
+    const buf = await makeZip([{ name: "a.txt", content: "hello world" }]);
+    const truncated = buf.subarray(0, buf.length - 10);
+    await expect(validateZipArchive(truncated, limits)).rejects.toBeInstanceOf(AppError);
+  });
+
+  it("rejects exact duplicate entries", async () => {
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const { execFileSync } = await import("node:child_process");
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "zip-"));
+    const zipPath = path.join(tmpDir, "dup.zip");
+    const py = [
+      "import zipfile",
+      "z = zipfile.ZipFile('" + zipPath + "', 'w')",
+      "z.writestr('dup.txt', 'a')",
+      "z.writestr('dup.txt', 'b')",
+      "z.close()",
+    ].join(String.fromCharCode(10));
+    execFileSync("python3", ["-c", py]);
+    const buf = fs.readFileSync(zipPath);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    await expect(validateZipArchive(buf, limits)).rejects.toBeInstanceOf(AppError);
+  });
+
+  it("rejects slash/backslash duplicate entries", async () => {
+    const zip = new JSZip();
+    zip.file("folder/file.txt", "a");
+    zip.file("folder\\file.txt", "b");
+    const buf = (await zip.generateAsync({ type: "nodebuffer" })) as Buffer;
+    await expect(validateZipArchive(buf, limits)).rejects.toBeInstanceOf(AppError);
+  });
+
+  it("rejects file/directory conflicts", async () => {
+    const zip = new JSZip();
+    zip.file("folder", "x");
+    zip.file("folder/child.txt", "y");
+    const buf = (await zip.generateAsync({ type: "nodebuffer" })) as Buffer;
+    await expect(validateZipArchive(buf, limits)).rejects.toBeInstanceOf(AppError);
+  });
+
+  it("rejects case-variation conflicts", async () => {
+    const zip = new JSZip();
+    zip.file("File.txt", "a");
+    zip.file("file.txt", "b");
+    const buf = (await zip.generateAsync({ type: "nodebuffer" })) as Buffer;
+    await expect(validateZipArchive(buf, limits)).rejects.toBeInstanceOf(AppError);
+  });
+
+  it("rejects unix symlink entries", async () => {
+    const tmpDir = (await import("node:fs")).mkdtempSync(
+      (await import("node:os")).tmpdir() + "/zip-",
+    );
+    const zipPath = tmpDir + "/sym.zip";
+    const { execFileSync } = await import("node:child_process");
+    const fs = await import("node:fs");
+    const py = [
+      "import zipfile",
+      "z = zipfile.ZipFile(\"" + zipPath + "\", \"w\")",
+      "info = zipfile.ZipInfo(\"link.txt\")",
+      "info.external_attr = (0o120777 & 0xFFFF) << 16",
+      "z.writestr(info, \"target\")",
+      "z.close()",
+    ].join("\n");
+    execFileSync("python3", ["-c", py]);
+    const buf = fs.readFileSync(zipPath);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    await expect(validateZipArchive(buf, limits)).rejects.toBeInstanceOf(AppError);
+  });
+
+  it("accepts directory entries", async () => {
+    const zip = new JSZip();
+    zip.folder("dir");
+    zip.file("dir/a.txt", "hi");
+    const buf = (await zip.generateAsync({ type: "nodebuffer" })) as Buffer;
+    await expect(validateZipArchive(buf, limits)).resolves.toBeUndefined();
+  });
+
+  it("rejects special file types", async () => {
+    const tmpDir = (await import("node:fs")).mkdtempSync(
+      (await import("node:os")).tmpdir() + "/zip-",
+    );
+    const zipPath = tmpDir + "/special.zip";
+    const { execFileSync } = await import("node:child_process");
+    const fs = await import("node:fs");
+    // FIFO mode
+    const py = [
+      "import zipfile",
+      "z = zipfile.ZipFile(\"" + zipPath + "\", \"w\")",
+      "info = zipfile.ZipInfo(\"fifo\")",
+      "info.external_attr = (0o010644 & 0xFFFF) << 16",
+      "z.writestr(info, \"\")",
+      "z.close()",
+    ].join("\n");
+    execFileSync("python3", ["-c", py]);
+    const buf = fs.readFileSync(zipPath);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    await expect(validateZipArchive(buf, limits)).rejects.toBeInstanceOf(AppError);
+  });
+});

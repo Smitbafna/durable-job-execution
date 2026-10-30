@@ -24,12 +24,9 @@ function fail(message: string): never {
 function isUnsafeEntryName(name: string): boolean {
   if (typeof name !== "string" || name === "") return true;
   if (name.includes("\0")) return true;
-  // Windows drive-prefixed paths.
   if (/^[a-zA-Z]:[\\/]/.test(name)) return true;
-  // Absolute paths.
   if (name.startsWith("/") || name.startsWith("\\")) return true;
 
-  // Normalize separators for traversal checks.
   const slashName = name.replace(/\\/g, "/");
   let normalized: string;
   try {
@@ -37,19 +34,50 @@ function isUnsafeEntryName(name: string): boolean {
   } catch {
     return true;
   }
-  if (normalized === ".." || normalized.startsWith("../")) return true;
-  // Also reject any raw segment that is ".." (catches weird encodings).
+  if (normalized === "" || normalized === "." || normalized === "..") return true;
+  if (normalized.startsWith("../")) return true;
   const segments = slashName.split("/");
   if (segments.some((s) => s === "..")) return true;
-  // Reject entries that normalize to an absolute path.
   if (path.posix.isAbsolute(normalized)) return true;
   return false;
 }
 
-/**
- * Validates the structure and metadata of a ZIP archive contained in `buffer`
- * without extracting it. Throws an `AppError` (400) on any validation failure.
- */
+function normalizeEntryPath(name: string): string {
+  const slashName = name.replace(/\\/g, "/");
+  let normalized = path.posix.normalize(slashName);
+  // Strip trailing slashes so directory entries and file entries share one form.
+  normalized = normalized.replace(/\/+$/, "");
+  if (normalized === "" || normalized === ".") {
+    throw new Error("invalid path");
+  }
+  return normalized;
+}
+
+function classifyEntry(entry: yauzl.Entry): "directory" | "file" {
+  const name = entry.fileName;
+  if (name.endsWith("/") || name.endsWith("\\")) {
+    return "directory";
+  }
+
+  const creatorPlatform = entry.versionMadeBy >> 8;
+  if (creatorPlatform === 3) {
+    const mode = (entry.externalFileAttributes >>> 16) & 0xffff;
+    const type = mode & 0o170000;
+    if (type === 0o040000) return "directory";
+    // Type 0 means "not specified" (common for many creators). Treat as a
+    // regular file. S_IFREG is explicitly a regular file. Everything else
+    // (symlink, block/char device, FIFO, socket) is rejected.
+    if (type === 0 || type === 0o100000) return "file";
+    fail("Unsupported or unsafe ZIP entry type");
+  }
+
+  // Non-Unix creators (DOS/Windows): external attributes are DOS attributes.
+  // No Unix-style special files are representable here.
+  const dosAttrs = entry.externalFileAttributes & 0xffff;
+  if (dosAttrs & 0x10) return "directory";
+  return "file";
+}
+
 export async function validateZipArchive(
   buffer: Buffer,
   limits: ZipLimits,
@@ -58,57 +86,67 @@ export async function validateZipArchive(
     fail("Uploaded file is empty");
   }
 
-  let zip: yauzl.ZipFile;
+  let zip: yauzl.ZipFile | undefined;
   try {
     zip = await yauzl.fromBufferPromise(buffer, {
       lazyEntries: true,
       validateEntrySizes: true,
       strictFileNames: true,
     });
-  } catch (e) {
-    fail(`Invalid ZIP archive: ${(e as Error).message}`);
-  }
 
-  try {
+    const seenPaths: { path: string; type: "directory" | "file" }[] = [];
     let entryCount = 0;
-    let totalUncompressed = 0n;
-    const maxTotal = BigInt(limits.maxTotalUncompressedBytes);
-    const maxIndividual = limits.maxIndividualUncompressedBytes;
-    const maxEntries = limits.maxEntries;
+    let declaredTotal = 0n;
+    let actualTotal = 0;
 
-    // yauzl with lazyEntries requires readEntry() after each entry; using
-    // the async iterable handles that internally.
     for await (const entry of zip.eachEntry()) {
       entryCount += 1;
-      if (entryCount > maxEntries) {
-        fail(`ZIP archive exceeds maximum entry count of ${maxEntries}`);
+      if (entryCount > limits.maxEntries) {
+        fail(`ZIP archive exceeds maximum entry count of ${limits.maxEntries}`);
       }
 
       if (isUnsafeEntryName(entry.fileName)) {
         fail(`Unsafe ZIP entry path: ${entry.fileName}`);
       }
 
-      // Reject encrypted entries.
       if (typeof entry.isEncrypted === "function" && entry.isEncrypted()) {
         fail("Encrypted ZIP entries are not supported");
       }
 
-      // Only stored (0) and deflate (8) are supported by the parser.
       if (entry.compressionMethod !== 0 && entry.compressionMethod !== 8) {
-        fail(
-          `Unsupported ZIP compression method: ${entry.compressionMethod}`,
-        );
+        fail(`Unsupported ZIP compression method: ${entry.compressionMethod}`);
       }
 
       if (typeof entry.canDecodeFileData === "function" && !entry.canDecodeFileData()) {
         fail("ZIP entry cannot be decoded");
       }
 
-      // Symlink detection via Unix file mode in external attributes.
-      const mode = (entry.externalFileAttributes >>> 16) & 0xffff;
-      if ((mode & 0xf000) === 0xa000) {
-        fail("Unsafe symlink entry in ZIP archive");
+      let normalized: string;
+      try {
+        normalized = normalizeEntryPath(entry.fileName);
+      } catch {
+        fail(`Unsafe ZIP entry path: ${entry.fileName}`);
       }
+
+      const entryType = classifyEntry(entry);
+
+      // Duplicate and file/directory conflict detection (case-insensitive).
+      const lower = normalized.toLowerCase();
+      for (const existing of seenPaths) {
+        const existingLower = existing.path.toLowerCase();
+        if (lower === existingLower) {
+          fail(`Duplicate ZIP entry path: ${entry.fileName}`);
+        }
+        const fileParentConflict =
+          (existing.type === "file" &&
+            lower.startsWith(existingLower + "/")) ||
+          (entryType === "file" &&
+            existingLower.startsWith(lower + "/"));
+        if (fileParentConflict) {
+          fail(`Conflicting ZIP entry paths: ${entry.fileName}`);
+        }
+      }
+      seenPaths.push({ path: normalized, type: entryType });
 
       const uncompressed = entry.uncompressedSize;
       if (
@@ -118,15 +156,14 @@ export async function validateZipArchive(
       ) {
         fail("Invalid ZIP entry size");
       }
-      if (uncompressed > maxIndividual) {
+      if (uncompressed > limits.maxIndividualUncompressedBytes) {
         fail(
-          `ZIP entry exceeds maximum uncompressed size of ${maxIndividual} bytes`,
+          `ZIP entry exceeds maximum uncompressed size of ${limits.maxIndividualUncompressedBytes} bytes`,
         );
       }
 
-      // Integer-overflow-safe accumulation.
-      totalUncompressed += BigInt(uncompressed);
-      if (totalUncompressed > maxTotal) {
+      declaredTotal += BigInt(uncompressed);
+      if (declaredTotal > BigInt(limits.maxTotalUncompressedBytes)) {
         fail(
           `ZIP archive exceeds maximum total uncompressed size of ${limits.maxTotalUncompressedBytes} bytes`,
         );
@@ -140,17 +177,65 @@ export async function validateZipArchive(
       ) {
         fail("Invalid ZIP entry compressed size");
       }
-    }
 
-    if (entryCount === 0) {
-      // An empty archive is structurally valid but useless; allow it.
+      // Directories carry no decompressed payload.
+      if (entryType === "directory") {
+        if (uncompressed !== 0) {
+          fail("ZIP directory entry has unexpected data");
+        }
+        continue;
+      }
+
+      // Stream the entry to count actual decompressed bytes. This does not write
+      // to disk and does not retain the full decompressed archive in memory.
+      let stream: ReturnType<yauzl.ZipFile["openReadStreamPromise"]> extends Promise<infer S>
+        ? S
+        : never;
+      try {
+        stream = await zip.openReadStreamPromise(entry);
+      } catch (e) {
+        fail(`Invalid ZIP archive: ${(e as Error).message}`);
+      }
+
+      let entryActual = 0;
+      try {
+        for await (const chunk of stream) {
+          entryActual += chunk.length;
+          if (entryActual > limits.maxIndividualUncompressedBytes) {
+            fail(
+              `ZIP entry exceeds maximum uncompressed size of ${limits.maxIndividualUncompressedBytes} bytes`,
+            );
+          }
+          actualTotal += chunk.length;
+          if (actualTotal > limits.maxTotalUncompressedBytes) {
+            fail(
+              `ZIP archive exceeds maximum total uncompressed size of ${limits.maxTotalUncompressedBytes} bytes`,
+            );
+          }
+        }
+      } catch (e) {
+        if (e instanceof AppError) throw e;
+        fail(`Invalid ZIP archive: ${(e as Error).message}`);
+      } finally {
+        try {
+          stream.destroy();
+        } catch {
+          /* ignore */
+        }
+      }
+
+      if (entryActual !== uncompressed) {
+        fail(
+          `ZIP entry decompressed size mismatch: declared ${uncompressed}, actual ${entryActual}`,
+        );
+      }
     }
   } catch (e) {
     if (e instanceof AppError) throw e;
     fail(`Invalid ZIP archive: ${(e as Error).message}`);
   } finally {
     try {
-      zip.close();
+      zip?.close();
     } catch {
       /* ignore */
     }
@@ -160,7 +245,6 @@ export async function validateZipArchive(
 export function isZipBuffer(buffer: Buffer): boolean {
   if (!Buffer.isBuffer(buffer) || buffer.length < 4) return false;
   if (buffer[0] !== 0x50 || buffer[1] !== 0x4b) return false;
-  // Local file header, empty archive, or spanned archive signatures.
   const sig = (buffer[2] << 8) | buffer[3];
   return sig === 0x0304 || sig === 0x0506 || sig === 0x0708;
 }
