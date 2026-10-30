@@ -1,0 +1,26 @@
+# Job Engine — minimal isolated PostgreSQL for local development & tests.
+#
+# This is intentionally separate from any other project's database. It uses
+# test-only credentials and an ephemeral named volume. Run:
+#   docker compose up -d
+#   npm run migrate        # apply schema
+#   npm run dev            # start the API
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: jobeng
+      POSTGRES_PASSWORD: jobeng-secret
+      POSTGRES_DB: job_engine
+    ports:
+      - "15432:5432"
+    volumes:
+      - "pgdata:/var/lib/postgresql/data"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jobeng"]
+      interval: 1s
+      timeout: 3s
+      retries: 20
+volumes:
+  pgdata:

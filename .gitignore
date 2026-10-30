@@ -21,11 +21,18 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
-# Editors
+# Editor / OS
 .vscode/*
 !.vscode/extensions.json
 .idea
 .DS_Store
+
+# Job Engine — local env & build/runtime artifacts (never commit secrets)
+job-engine/.env
+job-engine/.env.*
+job-engine/dist
+job-engine/test-results
+job-engine/coverage
 *.suo
 *.ntvs*
 *.njsproj

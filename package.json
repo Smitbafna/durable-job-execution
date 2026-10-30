@@ -8,7 +8,8 @@
   "workspaces": [
     "shared/",
     "signaling-server/",
-    "frontend/"
+    "frontend/",
+    "job-engine/"
   ],
   "scripts": {
     "dev": "npm run -w shared build && npm run -w frontend dev & npm run -w signaling-server dev",
@@ -20,7 +21,14 @@
     "test:e2e": "npm run -w shared build && playwright test",
     "test:e2e:ui": "npm run -w shared build && playwright test --headed",
     "start": "npm run -w shared build && npm run -w signaling-server start",
-    "smoke": "npm run -w shared build && tsx smoke_frontend.ts"
+    "smoke": "npm run -w shared build && tsx smoke_frontend.ts",
+
+    "dev:job-engine": "npm run -w job-engine dev",
+    "build:job-engine": "npm run -w job-engine build",
+    "typecheck:job-engine": "npm run -w job-engine typecheck",
+    "test:job-engine": "npm run -w job-engine test:unit",
+    "test:job-engine:integration": "npm run -w job-engine test:integration",
+    "migrate:job-engine": "npm run -w job-engine migrate"
   },
   "devDependencies": {
     "@playwright/test": "^1.64.1"
