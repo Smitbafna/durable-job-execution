@@ -12,6 +12,7 @@ import { DEFAULT_EXECUTION_LIMITS } from "../domain/executionSpec.js";
 export interface SubmitJobCommand {
   readonly type: string;
   readonly payload: unknown;
+  readonly maxAttempts?: number;
 }
 
 export class JobService {
@@ -53,8 +54,28 @@ export class JobService {
       }
     }
 
+    if (cmd.maxAttempts !== undefined) {
+      if (
+        typeof cmd.maxAttempts !== "number" ||
+        !Number.isInteger(cmd.maxAttempts) ||
+        cmd.maxAttempts < 1 ||
+        cmd.maxAttempts > 100
+      ) {
+        throw new AppError(
+          AppErrorCode.ValidationError,
+          400,
+          "maxAttempts must be a positive integer <= 100",
+        );
+      }
+    }
+
     const id = randomUUID();
-    const input: CreateJobInput = { id, type: cmd.type as JobType, payload };
+    const input: CreateJobInput = {
+      id,
+      type: cmd.type as JobType,
+      payload,
+      maxAttempts: cmd.maxAttempts,
+    };
     return this.repo.createJob(input);
   }
 

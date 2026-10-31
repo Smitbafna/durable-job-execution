@@ -44,4 +44,10 @@ export interface Job {
   readonly updatedAt: Date;
   readonly startedAt: Date | null;
   readonly completedAt: Date | null;
+  readonly leaseExpiresAt: Date | null;
+  readonly leaseGeneration: number;
+  readonly fencingToken: number;
+  readonly attemptCount: number;
+  readonly maxAttempts: number;
+  readonly nextAttemptAt: Date | null;
 }

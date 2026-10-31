@@ -36,6 +36,11 @@ export interface ArtifactConfig {
   readonly maxIndividualUncompressedBytes: number;
 }
 
+export interface LeaseConfig {
+  readonly leaseDurationMs: number;
+  readonly heartbeatIntervalMs: number;
+}
+
 export interface ExecutionConfig {
   readonly maxCpu: number;
   readonly maxMemoryMb: number;
@@ -57,6 +62,7 @@ export interface ServerConfig {
   readonly artifacts: ArtifactConfig;
   readonly execution: ExecutionConfig;
   readonly docker: DockerConfig;
+  readonly lease: LeaseConfig;
 }
 
 function asPort(value: string | undefined, fallback: number): number {
@@ -168,6 +174,15 @@ export function loadDockerConfig(): DockerConfig {
   };
 }
 
+export function loadLeaseConfig(): LeaseConfig {
+  const leaseDurationMs = asPositiveInt(process.env.LEASE_DURATION_MS, 30000, "LEASE_DURATION_MS");
+  const heartbeatIntervalMs = asPositiveInt(process.env.HEARTBEAT_INTERVAL_MS, 10000, "HEARTBEAT_INTERVAL_MS");
+  if (heartbeatIntervalMs >= leaseDurationMs) {
+    throw new Error("HEARTBEAT_INTERVAL_MS must be less than LEASE_DURATION_MS");
+  }
+  return { leaseDurationMs, heartbeatIntervalMs };
+}
+
 export function loadServerConfig(): ServerConfig {
   return {
     port: asPort(process.env.PORT, 4700),
@@ -175,5 +190,6 @@ export function loadServerConfig(): ServerConfig {
     artifacts: loadArtifactConfig(),
     execution: loadExecutionConfig(),
     docker: loadDockerConfig(),
+    lease: loadLeaseConfig(),
   };
 }

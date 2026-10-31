@@ -13,6 +13,7 @@
  */
 
 import { Pool } from "pg";
+import { performance } from "node:perf_hooks";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -20,7 +21,7 @@ import { JobRepository } from "../db/repository.js";
 import type { Job } from "../domain/job.js";
 import { lookupHandler } from "./handlers/registry.js";
 import { AppError, AppErrorCode } from "../errors.js";
-import type { WorkerConfig } from "../config.js";
+import type { WorkerConfig, LeaseConfig } from "../config.js";
 import type { ArtifactService } from "../service/artifactService.js";
 import { RuntimeRegistry, PlaceholderRuntime } from "../runtime/executionRuntime.js";
 import { validateExecutionSpec } from "../domain/executionSpec.js";
@@ -39,6 +40,11 @@ export class Worker {
   private runtimeRegistry?: RuntimeRegistry;
   private artifactService?: ArtifactService;
   private executionLimits: ExecutionLimits = DEFAULT_EXECUTION_LIMITS;
+  private leaseConfig: LeaseConfig = { leaseDurationMs: 30000, heartbeatIntervalMs: 10000 };
+  private readonly heartbeats = new Map<string, NodeJS.Timeout>();
+  private readonly heartbeatStates = new Map<string, any>();
+  private readonly ownershipLost = new Set<string>();
+  private readonly abortControllers = new Map<string, AbortController>();
 
   constructor(
     private readonly config: WorkerConfig,
@@ -49,20 +55,27 @@ export class Worker {
       runtimeRegistry?: RuntimeRegistry;
       artifactService?: ArtifactService;
       executionLimits?: ExecutionLimits;
+      leaseConfig?: LeaseConfig;
     },
     artifactService?: ArtifactService,
     executionLimits?: ExecutionLimits,
+    leaseConfig?: LeaseConfig,
   ) {
     if (runtimeRegistryOrOptions instanceof RuntimeRegistry) {
       this.runtimeRegistry = runtimeRegistryOrOptions;
       this.artifactService = artifactService;
       this.executionLimits = executionLimits ?? DEFAULT_EXECUTION_LIMITS;
+      this.leaseConfig = leaseConfig ?? this.leaseConfig;
     } else if (runtimeRegistryOrOptions) {
       this.runtimeRegistry = runtimeRegistryOrOptions.runtimeRegistry;
       this.artifactService =
         runtimeRegistryOrOptions.artifactService ?? artifactService;
       this.executionLimits =
         runtimeRegistryOrOptions.executionLimits ?? executionLimits ?? DEFAULT_EXECUTION_LIMITS;
+      this.leaseConfig =
+        runtimeRegistryOrOptions.leaseConfig ?? leaseConfig ?? this.leaseConfig;
+    } else if (leaseConfig) {
+      this.leaseConfig = leaseConfig;
     }
   }
 
@@ -94,6 +107,7 @@ export class Worker {
 
   private async runLoop(): Promise<void> {
     while (!this.stopping) {
+      const claimStartedAt = performance.now();
       const job = await this.claimNextJob();
       if (job === null) {
         await this.sleep(this.config.pollIntervalMs);
@@ -102,7 +116,7 @@ export class Worker {
 
       // Keep executing on the same slot — do not spawn child loops.
       try {
-        await this.executeJob(job);
+        await this.executeJob(job, claimStartedAt);
       } catch (err) {
         this.logger.error(
           `Unexpected error during job id ${job.id}; marking failed.`,
@@ -113,7 +127,7 @@ export class Worker {
           .markFailed(job.id, {
             code: AppErrorCode.Internal,
             message: "Internal worker error",
-          })
+          }, this.config.workerId, job.leaseGeneration)
           .catch(() => undefined);
       }
     }
@@ -127,7 +141,7 @@ export class Worker {
     // dedicated connection.
     const repo = new JobRepository(this.pool ?? this.repo.poolConnection);
     return repo
-      .claimNextJob(this.config.workerId)
+      .claimNextJob(this.config.workerId, this.leaseConfig.leaseDurationMs)
       .catch((err) => {
         this.logger.error(
           `claimNextJob failed; will retry on the next poll.`,
@@ -137,9 +151,20 @@ export class Worker {
       });
   }
 
-  private async executeJob(job: Job): Promise<void> {
+  private async executeJob(job: Job, claimStartedAt: number = performance.now()): Promise<void> {
+    const abortController = new AbortController();
+    this.startHeartbeat(job, abortController, claimStartedAt);
+    try {
+      await this.executeJobImpl(job, abortController);
+    } finally {
+      this.stopHeartbeat(job.id);
+      this.abortControllers.delete(job.id);
+    }
+  }
+
+  private async executeJobImpl(job: Job, abortController: AbortController): Promise<void> {
     if (job.type === "execute_artifact") {
-      await this.executeArtifactJob(job);
+      await this.executeArtifactJob(job, abortController);
       return;
     }
     const handler = lookupHandler(job.type);
@@ -154,17 +179,18 @@ export class Worker {
         {
           code: AppErrorCode.UnsupportedJobType,
           message: `No handler registered for job type "${job.type}".`,
-        },
-      );
+        }, this.config.workerId, job.leaseGeneration);
       this.maybeLogConsistencyError("markFailed", job.id, affected);
       return;
     }
 
     try {
       const result = await handler(job.payload);
-      const affected = await this.repo.markSucceeded(job.id, result);
+      if (this.ownershipLost.has(job.id)) return;
+      const affected = await this.repo.markSucceeded(job.id, result, this.config.workerId, job.leaseGeneration);
       this.maybeLogConsistencyError("markSucceeded", job.id, affected);
     } catch (err) {
+      if (this.ownershipLost.has(job.id)) return;
       const appError = err instanceof AppError ? err : this.sanitizeError(err);
 
       this.logger.error(
@@ -181,7 +207,7 @@ export class Worker {
         code: appError.code,
         message: appError.message,
         details: appError.details,
-      });
+      }, this.config.workerId, job.leaseGeneration);
       this.maybeLogConsistencyError("markFailed", job.id, affected);
     }
   }
@@ -191,13 +217,14 @@ export class Worker {
    * `running` — it was already completed, terminal, or picked up by another
    * worker. This is a consistency/log event, not a fatal error.
    */
-  private async executeArtifactJob(job: Job): Promise<void> {
+  private async executeArtifactJob(job: Job, abortController: AbortController): Promise<void> {
+
     const specResult = validateExecutionSpec(job.payload, this.executionLimits);
     if (specResult instanceof AppError) {
       const affected = await this.repo.markFailed(job.id, {
         code: specResult.code,
         message: specResult.message,
-      });
+      }, this.config.workerId, job.leaseGeneration);
       this.maybeLogConsistencyError("markFailed", job.id, affected);
       return;
     }
@@ -208,7 +235,7 @@ export class Worker {
       const affected = await this.repo.markFailed(job.id, {
         code: AppErrorCode.UnsupportedJobType,
         message: `Unsupported runtime: ${spec.runtime}`,
-      });
+      }, this.config.workerId, job.leaseGeneration);
       this.maybeLogConsistencyError("markFailed", job.id, affected);
       return;
     }
@@ -217,7 +244,7 @@ export class Worker {
       const affected = await this.repo.markFailed(job.id, {
         code: AppErrorCode.Internal,
         message: "Artifact service unavailable",
-      });
+      }, this.config.workerId, job.leaseGeneration);
       this.maybeLogConsistencyError("markFailed", job.id, affected);
       return;
     }
@@ -227,7 +254,7 @@ export class Worker {
       const affected = await this.repo.markFailed(job.id, {
         code: AppErrorCode.NotFound,
         message: `Artifact not found: ${spec.artifactId}`,
-      });
+      }, this.config.workerId, job.leaseGeneration);
       this.maybeLogConsistencyError("markFailed", job.id, affected);
       return;
     }
@@ -237,10 +264,11 @@ export class Worker {
       tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "job-engine-artifact-"));
       const artifactPath = path.join(tempDir, "artifact.zip");
       await this.artifactService.materializeArtifact(spec.artifactId, artifactPath);
-      const result = await runtime.execute(spec, artifactPath);
-      const affected = await this.repo.markSucceeded(job.id, result);
+      const result = await runtime.execute(spec, artifactPath, { signal: abortController.signal });
+      const affected = await this.repo.markSucceeded(job.id, result, this.config.workerId, job.leaseGeneration);
       this.maybeLogConsistencyError("markSucceeded", job.id, affected);
     } catch (err) {
+      if (this.ownershipLost.has(job.id)) return;
       const appError = err instanceof AppError ? err : this.sanitizeError(err);
       this.logger.error(
         `Job id ${job.id} (execute_artifact) failed; persisting error.`,
@@ -251,13 +279,169 @@ export class Worker {
         code: appError.code,
         message: appError.message,
         details: appError.details,
-      });
+      }, this.config.workerId, job.leaseGeneration);
       this.maybeLogConsistencyError("markFailed", job.id, affected);
     } finally {
       if (tempDir) {
         await fs.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
       }
     }
+  }
+
+  private startHeartbeat(job: Job, abortController: AbortController, claimStartedAt: number = performance.now()): void {
+    if (this.heartbeats.has(job.id)) return;
+    this.abortControllers.set(job.id, abortController);
+    const state = {
+      timer: undefined as NodeJS.Timeout | undefined,
+      inFlight: false,
+      stopped: false,
+      consecutiveFailures: 0,
+      lastRenewalStartedAt: claimStartedAt,
+      maxRetries: Math.max(1, Math.floor(this.leaseConfig.leaseDurationMs / this.leaseConfig.heartbeatIntervalMs)),
+    };
+    const safetyMarginMs = Math.min(5000, this.leaseConfig.heartbeatIntervalMs);
+    const safetyWindowMs = this.leaseConfig.leaseDurationMs - safetyMarginMs;
+
+    const schedule = (delayMs: number) => {
+      if (state.stopped) return;
+      if (state.timer) return;
+      const remainingMs = safetyWindowMs - (performance.now() - state.lastRenewalStartedAt);
+      if (remainingMs <= 0) {
+        this.failHeartbeat(job, state, "lease safety deadline reached");
+        return;
+      }
+      const actualDelay = Math.min(Math.max(1, delayMs), remainingMs);
+      state.timer = setTimeout(() => {
+        state.timer = undefined;
+        void this.runHeartbeat(job, state, abortController, safetyWindowMs);
+      }, actualDelay);
+      this.heartbeats.set(job.id, state.timer);
+    };
+
+    state.timer = setTimeout(() => {
+      state.timer = undefined;
+      void this.runHeartbeat(job, state, abortController, safetyWindowMs);
+    }, this.leaseConfig.heartbeatIntervalMs);
+    this.heartbeats.set(job.id, state.timer);
+    // Store state on a map by using a parallel map.
+    this.heartbeatStates.set(job.id, state);
+  }
+
+  private async runHeartbeat(
+    job: Job,
+    state: {
+      timer: NodeJS.Timeout | undefined;
+      inFlight: boolean;
+      stopped: boolean;
+      consecutiveFailures: number;
+      lastRenewalStartedAt: number;
+      maxRetries: number;
+    },
+    abortController: AbortController,
+    safetyWindowMs: number,
+  ): Promise<void> {
+    if (state.stopped || state.inFlight) return;
+    state.inFlight = true;
+    const renewalStartedAt = performance.now();
+    try {
+      if (performance.now() - state.lastRenewalStartedAt >= safetyWindowMs) {
+        this.failHeartbeat(job, state, "lease safety deadline reached");
+        return;
+      }
+      const ok = await this.repo.renewLease(
+        job.id,
+        this.config.workerId,
+        job.leaseGeneration,
+        this.leaseConfig.leaseDurationMs,
+      );
+      if (state.stopped) return;
+      if (ok) {
+        state.consecutiveFailures = 0;
+        state.lastRenewalStartedAt = renewalStartedAt;
+        this.scheduleHeartbeat(job, state, this.leaseConfig.heartbeatIntervalMs, safetyWindowMs, abortController);
+        return;
+      }
+      this.failHeartbeat(job, state, "lease renewal returned false");
+    } catch (err) {
+      if (state.stopped) return;
+      state.consecutiveFailures += 1;
+      this.logger.error(
+        `Heartbeat failed for job ${job.id}`,
+        { jobId: job.id, workerId: this.config.workerId, attempt: state.consecutiveFailures, error: (err as Error).message },
+        err,
+      );
+      const elapsed = performance.now() - state.lastRenewalStartedAt;
+      if (
+        elapsed >= safetyWindowMs ||
+        state.consecutiveFailures >= state.maxRetries
+      ) {
+        this.failHeartbeat(job, state, "heartbeat safety deadline reached");
+        return;
+      }
+      const backoffMs = Math.min(
+        this.leaseConfig.heartbeatIntervalMs,
+        1000 * 2 ** (state.consecutiveFailures - 1),
+      );
+      const remainingMs = safetyWindowMs - elapsed;
+      if (backoffMs >= remainingMs) {
+        this.failHeartbeat(job, state, "heartbeat safety deadline reached");
+        return;
+      }
+      this.scheduleHeartbeat(job, state, backoffMs, safetyWindowMs, abortController);
+    } finally {
+      state.inFlight = false;
+    }
+  }
+
+  private scheduleHeartbeat(
+    job: Job,
+    state: {
+      timer: NodeJS.Timeout | undefined;
+      inFlight: boolean;
+      stopped: boolean;
+      consecutiveFailures: number;
+      lastRenewalStartedAt: number;
+      maxRetries: number;
+    },
+    delayMs: number,
+    safetyWindowMs: number,
+    abortController: AbortController,
+  ): void {
+    if (state.stopped) return;
+    const remainingMs = safetyWindowMs - (performance.now() - state.lastRenewalStartedAt);
+    if (remainingMs <= 0) {
+      this.failHeartbeat(job, state, "lease safety deadline reached");
+      return;
+    }
+    const delay = Math.min(Math.max(1, delayMs), remainingMs);
+    state.timer = setTimeout(() => {
+      state.timer = undefined;
+      void this.runHeartbeat(job, state, abortController, safetyWindowMs);
+    }, delay);
+    this.heartbeats.set(job.id, state.timer);
+  }
+
+  private failHeartbeat(job: Job, state: { stopped: boolean; timer?: NodeJS.Timeout }, reason: string): void {
+    if (state.stopped) return;
+    state.stopped = true;
+    if (state.timer) clearTimeout(state.timer);
+    state.timer = undefined;
+    this.heartbeats.delete(job.id);
+    this.ownershipLost.add(job.id);
+    this.abortControllers.get(job.id)?.abort();
+    this.logger.error(`Heartbeat failed for job ${job.id}: ${reason}`, { jobId: job.id });
+  }
+
+  private stopHeartbeat(jobId: string): void {
+    const state = this.heartbeatStates.get(jobId);
+    if (state) {
+      state.stopped = true;
+      if (state.timer) clearTimeout(state.timer);
+      state.timer = undefined;
+    }
+    this.heartbeats.delete(jobId);
+    this.heartbeatStates.delete(jobId);
+    this.abortControllers.delete(jobId);
   }
 
   private maybeLogConsistencyError(

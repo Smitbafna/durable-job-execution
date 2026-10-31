@@ -9,7 +9,10 @@ export async function extractZipToWorkspace(
   buffer: Buffer,
   workspaceDir: string,
   limits: ZipLimits,
+  signal?: AbortSignal,
 ): Promise<void> {
+  if (signal?.aborted) throw new Error("extraction cancelled");
+
   await validateZipArchive(buffer, limits);
 
   await fs.mkdir(workspaceDir, { recursive: true });
@@ -24,6 +27,7 @@ export async function extractZipToWorkspace(
       strictFileNames: true,
     });
     for await (const entry of zip.eachEntry()) {
+      if (signal?.aborted) throw new Error("extraction cancelled");
       entryCount += 1;
       if (entryCount > limits.maxEntries) {
         throw new Error("entry count exceeded");
@@ -108,6 +112,7 @@ export async function extractZipToWorkspace(
         throw new Error("size mismatch");
       }
     }
+    if (signal?.aborted) throw new Error("extraction cancelled");
   } catch (e) {
     await fs.rm(workspaceDir, { recursive: true, force: true }).catch(() => undefined);
     throw e;

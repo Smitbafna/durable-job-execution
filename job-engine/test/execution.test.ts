@@ -51,13 +51,14 @@ describe("job execution outcomes", () => {
     );
 
     const repo = new JobRepository(pool);
-    const claimed = await repo.claimNextJob(`exec-${Math.random().toString(16).slice(2)}`);
+    const workerId = `exec-${Math.random().toString(16).slice(2)}`;
+    const claimed = await repo.claimNextJob(workerId);
     expect(claimed).not.toBeNull();
     expect(claimed!.status).toBe("running");
 
     const handler = sumNumbersHandler({});
     const result = handler(claimed!.payload);
-    const affected = await repo.markSucceeded(id, result);
+    const affected = await repo.markSucceeded(id, result, workerId, claimed!.leaseGeneration);
 
     expect(affected).toBe(1);
 
@@ -78,7 +79,8 @@ describe("job execution outcomes", () => {
     );
 
     const repo = new JobRepository(pool);
-    const claimed = await repo.claimNextJob(`exec2-${Math.random().toString(16).slice(2)}`);
+    const workerId = `exec2-${Math.random().toString(16).slice(2)}`;
+    const claimed = await repo.claimNextJob(workerId);
     expect(claimed).not.toBeNull();
 
     const handler = sumNumbersHandler({});
@@ -94,6 +96,8 @@ describe("job execution outcomes", () => {
     const affected = await repo.markFailed(
       id,
       { code: "VALIDATION_ERROR", message: "payload.numbers must be an array" },
+      workerId,
+      claimed!.leaseGeneration,
     );
     expect(affected).toBe(1);
 
@@ -117,7 +121,7 @@ describe("job execution outcomes", () => {
     const failed = await repo.markFailed(id, {
       code: "DUPLICATE",
       message: "should not happen",
-    });
+    }, "stale-worker", 0);
     expect(failed).toBe(0);
   });
 
@@ -139,7 +143,8 @@ describe("job execution outcomes", () => {
 
     // Claim the first job (which has an invalid payload that will cause the
     // handler to throw), execute it, and record the failure.
-    const first = await repo.claimNextJob(`continue1-${Math.random().toString(16).slice(2)}`);
+    const workerId1 = `continue1-${Math.random().toString(16).slice(2)}`;
+    const first = await repo.claimNextJob(workerId1);
     expect(first).not.toBeNull();
     expect(first!.status).toBe("running");
 
@@ -156,15 +161,16 @@ describe("job execution outcomes", () => {
     const markFailed = await repo.markFailed(id1, {
       code: "HANDLER_EXCEPTION",
       message: failureError!.message,
-    });
+    }, workerId1, first!.leaseGeneration);
     expect(markFailed).toBe(1);
 
     // Claim and execute the second job (valid payload).
-    const second = await repo.claimNextJob(`continue2-${Math.random().toString(16).slice(2)}`);
+    const workerId2 = `continue2-${Math.random().toString(16).slice(2)}`;
+    const second = await repo.claimNextJob(workerId2);
     expect(second).not.toBeNull();
     expect(second!.status).toBe("running");
     const result = handler(second!.payload);
-    const affected = await repo.markSucceeded(second!.id, result);
+    const affected = await repo.markSucceeded(second!.id, result, workerId2, second!.leaseGeneration);
     expect(affected).toBe(1);
 
     const [r1, r2] = await Promise.all([repo.getJobById(id1), repo.getJobById(id2)]);

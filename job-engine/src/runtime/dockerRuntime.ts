@@ -24,18 +24,36 @@ export class DockerRuntime implements ExecutionRuntime {
     private readonly dockerConfig: DockerConfig,
   ) {}
 
-  async execute(spec: ExecutionSpec, artifactPath: string): Promise<ExecutionResult> {
+  async execute(
+    spec: ExecutionSpec,
+    artifactPath: string,
+    options?: { signal?: AbortSignal },
+  ): Promise<ExecutionResult> {
     const started = Date.now();
     const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "job-engine-workspace-"));
     const stagedZip = path.join(workspace, "artifact.zip");
     const extractDir = path.join(workspace, "project");
     const containerName = `job-engine-${randomUUID()}`;
     this.activeContainers.add(containerName);
+    let aborted = false;
+    const abortHandler = () => {
+      aborted = true;
+      void execFileAsync("docker", ["kill", containerName]).catch(() => undefined);
+      void execFileAsync("docker", ["rm", "-f", containerName]).catch(() => undefined);
+    };
+    options?.signal?.addEventListener("abort", abortHandler, { once: true });
     try {
+      if (options?.signal?.aborted) {
+        aborted = true;
+        throw new Error("execution cancelled");
+      }
       await fs.copyFile(artifactPath, stagedZip);
       const limits = toZipLimits(this.artifactConfig);
       const zipBuffer = await fs.readFile(stagedZip);
-      await extractZipToWorkspace(zipBuffer, extractDir, limits);
+      await extractZipToWorkspace(zipBuffer, extractDir, limits, options?.signal);
+      if (aborted || options?.signal?.aborted) {
+        throw new Error("execution cancelled");
+      }
 
       const workdirRelative = spec.workingDirectory === "." ? "" : spec.workingDirectory;
       const containerWorkdir = workdirRelative
@@ -90,7 +108,10 @@ export class DockerRuntime implements ExecutionRuntime {
         ...spec.command,
       ];
 
-      const result = await this.runContainer(args, containerName, spec.resources.timeoutSeconds, this.dockerConfig.maxOutputBytes);
+      if (aborted || options?.signal?.aborted) {
+        throw new Error("execution cancelled");
+      }
+      const result = await this.runContainer(args, containerName, spec.resources.timeoutSeconds, this.dockerConfig.maxOutputBytes, options?.signal);
       return {
         exitCode: result.exitCode,
         stdout: result.stdout,
@@ -98,12 +119,14 @@ export class DockerRuntime implements ExecutionRuntime {
         durationMs: Date.now() - started,
       };
     } catch (err) {
+      options?.signal?.removeEventListener("abort", abortHandler);
       await execFileAsync("docker", ["rm", "-f", containerName]).catch((e) => {
         console.error("[docker-runtime] cleanup failed", { containerName, error: (e as Error).message });
       });
       if (err instanceof AppError) throw err;
       throw new AppError(AppErrorCode.Internal, 500, `Docker execution failed: ${(err as Error).message}`);
     } finally {
+      options?.signal?.removeEventListener("abort", abortHandler);
       this.activeContainers.delete(containerName);
       await fs.rm(workspace, { recursive: true, force: true }).catch((e) => {
         console.error("[docker-runtime] workspace cleanup failed", { workspace, error: (e as Error).message });
@@ -130,8 +153,21 @@ export class DockerRuntime implements ExecutionRuntime {
     containerName: string,
     timeoutSeconds: number,
     maxOutputBytes: number,
+    signal?: AbortSignal,
   ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
     return new Promise((resolve, reject) => {
+      let aborted = false;
+      let abortCleanup: Promise<void> | null = null;
+      const abortHandler = () => {
+        if (settled) return;
+        aborted = true;
+        abortCleanup = (async () => {
+          await execFileAsync("docker", ["kill", containerName]).catch(() => undefined);
+          await execFileAsync("docker", ["rm", "-f", containerName]).catch(() => undefined);
+        })();
+      };
+      signal?.addEventListener("abort", abortHandler, { once: true });
+
       const child = spawn("docker", args, { stdio: ["ignore", "pipe", "pipe"] });
       const stdoutChunks: Buffer[] = [];
       const stderrChunks: Buffer[] = [];
@@ -165,6 +201,8 @@ export class DockerRuntime implements ExecutionRuntime {
         return current + slice.length;
       };
 
+      // Abort handling already registered before spawn; nothing to add here.
+
       child.stdout.on("data", (chunk: Buffer) => {
         stdoutBytes = append(stdoutChunks, stdoutBytes, chunk);
       });
@@ -178,10 +216,18 @@ export class DockerRuntime implements ExecutionRuntime {
         clearTimeout(timer);
         reject(err);
       });
-      child.on("close", (code) => {
+      child.on("close", async (code) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        signal?.removeEventListener("abort", abortHandler);
+        if (aborted && abortCleanup) {
+          await abortCleanup;
+        }
+        if (aborted) {
+          reject(new Error("execution cancelled"));
+          return;
+        }
         let stdout = Buffer.concat(stdoutChunks).toString("utf8");
         let stderr = Buffer.concat(stderrChunks).toString("utf8");
         if (truncated) {

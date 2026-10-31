@@ -95,3 +95,19 @@ describe("extractZipToWorkspace", () => {
     await fs.rm(dir, { recursive: true, force: true });
   });
 });
+
+describe("extraction cancellation", () => {
+  it("aborted signal prevents extraction", async () => {
+    const dir = await (await import("node:fs/promises")).mkdtemp((await import("node:os")).tmpdir() + "/ws-");
+    const JSZip = (await import("jszip")).default;
+    const zip = new JSZip();
+    zip.file("a.txt", "hi");
+    const buf = (await zip.generateAsync({ type: "nodebuffer" })) as Buffer;
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      (await import("../zip/zipExtractor.js")).extractZipToWorkspace(buf, dir, limits, controller.signal),
+    ).rejects.toBeTruthy();
+    await (await import("node:fs/promises")).rm(dir, { recursive: true, force: true });
+  });
+});

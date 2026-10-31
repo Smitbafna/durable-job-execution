@@ -18,7 +18,7 @@ import { JobRepository } from "../db/repository.js";
 import { ArtifactRepository } from "../db/artifactRepository.js";
 import { ArtifactService } from "../service/artifactService.js";
 import { LocalArtifactStorage } from "../storage/localArtifactStorage.js";
-import { loadArtifactConfig, loadDockerConfig, loadExecutionConfig } from "../config.js";
+import { loadArtifactConfig, loadDockerConfig, loadExecutionConfig, loadLeaseConfig } from "../config.js";
 import { RuntimeRegistry } from "../runtime/executionRuntime.js";
 import { DockerRuntime } from "../runtime/dockerRuntime.js";
 import { Worker, type WorkerLogger } from "./worker.js";
@@ -88,6 +88,7 @@ async function main(): Promise<void> {
       maxInputJsonBytes: executionConfig.maxInputJsonBytes,
       maxInputDepth: executionConfig.maxInputDepth,
     },
+    loadLeaseConfig(),
   );
 
   const quit = async (signal: string): Promise<void> => {

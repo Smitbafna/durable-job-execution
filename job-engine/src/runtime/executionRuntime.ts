@@ -8,7 +8,11 @@ export interface ExecutionResult {
 }
 
 export interface ExecutionRuntime {
-  execute(spec: ExecutionSpec, artifactPath: string): Promise<ExecutionResult>;
+  execute(
+    spec: ExecutionSpec,
+    artifactPath: string,
+    options?: { signal?: AbortSignal },
+  ): Promise<ExecutionResult>;
 }
 
 /**
@@ -19,6 +23,7 @@ export class PlaceholderRuntime implements ExecutionRuntime {
   async execute(
     _spec: ExecutionSpec,
     _artifactPath: string,
+    _options?: { signal?: AbortSignal },
   ): Promise<ExecutionResult> {
     return {
       exitCode: 0,

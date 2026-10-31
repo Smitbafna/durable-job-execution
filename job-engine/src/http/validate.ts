@@ -13,6 +13,7 @@ import { AppError, AppErrorCode } from "../errors.js";
 export interface ParsedSubmitJobRequest {
   readonly type: string;
   readonly payload: unknown;
+  readonly maxAttempts?: number;
 }
 
 /**
@@ -51,7 +52,21 @@ export function validateSubmitJobRequest(
     );
   }
 
-  return { type: b.type, payload: b.payload };
+  if (b.maxAttempts !== undefined) {
+    if (
+      typeof b.maxAttempts !== "number" ||
+      !Number.isInteger(b.maxAttempts) ||
+      b.maxAttempts < 1 ||
+      b.maxAttempts > 100
+    ) {
+      return AppError.badRequest(
+        AppErrorCode.ValidationError,
+        "Field 'maxAttempts' must be a positive integer <= 100",
+      );
+    }
+  }
+
+  return { type: b.type, payload: b.payload, maxAttempts: b.maxAttempts as number | undefined };
 }
 
 const UUID_V4_RE =
