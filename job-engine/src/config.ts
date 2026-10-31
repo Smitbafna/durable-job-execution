@@ -46,7 +46,6 @@ export interface ExecutionConfig {
 }
 
 export interface DockerConfig {
-  readonly image: string;
   readonly pidLimit: number;
   readonly maxOutputBytes: number;
   readonly tmpfsSizeMb: number;
@@ -163,7 +162,6 @@ export function loadExecutionConfig(): ExecutionConfig {
 
 export function loadDockerConfig(): DockerConfig {
   return {
-    image: process.env.DOCKER_IMAGE ?? "python:3.12",
     pidLimit: asPositiveInt(process.env.DOCKER_PID_LIMIT, 64, "DOCKER_PID_LIMIT"),
     maxOutputBytes: asPositiveInt(process.env.DOCKER_MAX_OUTPUT_BYTES, 1024 * 1024, "DOCKER_MAX_OUTPUT_BYTES"),
     tmpfsSizeMb: asPositiveInt(process.env.DOCKER_TMPFS_SIZE_MB, 64, "DOCKER_TMPFS_SIZE_MB"),

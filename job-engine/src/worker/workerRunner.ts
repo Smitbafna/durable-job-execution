@@ -70,7 +70,7 @@ async function main(): Promise<void> {
   const runtimeRegistry = new RuntimeRegistry();
   runtimeRegistry.register(
     "python:3.12",
-    new DockerRuntime(artifactConfig, loadDockerConfig(), loadExecutionConfig()),
+    new DockerRuntime(artifactConfig, loadDockerConfig()),
   );
   const executionConfig = loadExecutionConfig();
   const worker = new Worker(

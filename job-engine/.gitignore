@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Local environment
+.env
+.env.*
+
+# Runtime artifact storage
+data/
+
+# Test/coverage artifacts
+coverage/
+test-results/

@@ -89,6 +89,7 @@ export class Worker {
     if (this.stopping) return;
     this.stopping = true;
     await Promise.allSettled(this.loops);
+    await this.runtimeRegistry?.shutdown?.();
   }
 
   private async runLoop(): Promise<void> {

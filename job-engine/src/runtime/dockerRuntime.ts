@@ -8,20 +8,20 @@ import type { ExecutionRuntime, ExecutionResult } from "./executionRuntime.js";
 import type { ExecutionSpec } from "../domain/executionSpec.js";
 import type { DockerConfig } from "../config.js";
 import { extractZipToWorkspace } from "../zip/zipExtractor.js";
-import { toZipLimits } from "../zip/zipValidation.js";
+import { toZipLimits } from "./../zip/zipValidation.js";
 import type { ArtifactConfig } from "../config.js";
 import { AppError, AppErrorCode } from "../errors.js";
 
 const execFileAsync = promisify(execFile);
+const DOCKER_IMAGE = "python:3.12";
+const TRUNCATION_MARKER = "\n[output truncated]";
 
 export class DockerRuntime implements ExecutionRuntime {
+  private readonly activeContainers = new Set<string>();
+
   constructor(
     private readonly artifactConfig: ArtifactConfig,
     private readonly dockerConfig: DockerConfig,
-    private readonly executionLimits: { maxInputJsonBytes: number; maxInputDepth: number } = {
-      maxInputJsonBytes: 65536,
-      maxInputDepth: 8,
-    },
   ) {}
 
   async execute(spec: ExecutionSpec, artifactPath: string): Promise<ExecutionResult> {
@@ -30,6 +30,7 @@ export class DockerRuntime implements ExecutionRuntime {
     const stagedZip = path.join(workspace, "artifact.zip");
     const extractDir = path.join(workspace, "project");
     const containerName = `job-engine-${randomUUID()}`;
+    this.activeContainers.add(containerName);
     try {
       await fs.copyFile(artifactPath, stagedZip);
       const limits = toZipLimits(this.artifactConfig);
@@ -45,10 +46,14 @@ export class DockerRuntime implements ExecutionRuntime {
       if (hostWorkdir !== extractRoot && !hostWorkdir.startsWith(extractRoot + path.sep)) {
         throw new AppError(AppErrorCode.ValidationError, 400, "Invalid working directory");
       }
+      let stat;
       try {
-        await fs.access(hostWorkdir);
+        stat = await fs.stat(hostWorkdir);
       } catch {
         throw new AppError(AppErrorCode.ValidationError, 400, "Working directory does not exist");
+      }
+      if (!stat.isDirectory()) {
+        throw new AppError(AppErrorCode.ValidationError, 400, "Working directory is not a directory");
       }
 
       const args = [
@@ -81,7 +86,7 @@ export class DockerRuntime implements ExecutionRuntime {
         containerWorkdir,
         "-e",
         "PYTHONDONTWRITEBYTECODE=1",
-        this.dockerConfig.image,
+        DOCKER_IMAGE,
         ...spec.command,
       ];
 
@@ -93,13 +98,31 @@ export class DockerRuntime implements ExecutionRuntime {
         durationMs: Date.now() - started,
       };
     } catch (err) {
-      // Best-effort cleanup of container.
-      await execFileAsync("docker", ["rm", "-f", containerName]).catch(() => undefined);
+      await execFileAsync("docker", ["rm", "-f", containerName]).catch((e) => {
+        console.error("[docker-runtime] cleanup failed", { containerName, error: (e as Error).message });
+      });
       if (err instanceof AppError) throw err;
       throw new AppError(AppErrorCode.Internal, 500, `Docker execution failed: ${(err as Error).message}`);
     } finally {
-      await fs.rm(workspace, { recursive: true, force: true }).catch(() => undefined);
+      this.activeContainers.delete(containerName);
+      await fs.rm(workspace, { recursive: true, force: true }).catch((e) => {
+        console.error("[docker-runtime] workspace cleanup failed", { workspace, error: (e as Error).message });
+      });
     }
+  }
+
+  async shutdown(): Promise<void> {
+    await Promise.all(
+      [...this.activeContainers].map(async (name) => {
+        await execFileAsync("docker", ["kill", name]).catch((e) => {
+          console.error("[docker-runtime] kill failed", { containerName: name, error: (e as Error).message });
+        });
+        await execFileAsync("docker", ["rm", "-f", name]).catch((e) => {
+          console.error("[docker-runtime] cleanup failed", { containerName: name, error: (e as Error).message });
+        });
+      }),
+    );
+    this.activeContainers.clear();
   }
 
   private async runContainer(
@@ -110,44 +133,43 @@ export class DockerRuntime implements ExecutionRuntime {
   ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
     return new Promise((resolve, reject) => {
       const child = spawn("docker", args, { stdio: ["ignore", "pipe", "pipe"] });
-      let stdout = "";
-      let stderr = "";
-      let stdoutTruncated = false;
-      let stderrTruncated = false;
+      const stdoutChunks: Buffer[] = [];
+      const stderrChunks: Buffer[] = [];
+      let stdoutBytes = 0;
+      let stderrBytes = 0;
+      let totalBytes = 0;
+      let truncated = false;
       let timedOut = false;
       let settled = false;
 
       const timer = setTimeout(() => {
         timedOut = true;
-        execFileAsync("docker", ["kill", containerName]).catch(() => undefined);
+        execFileAsync("docker", ["kill", containerName]).catch((e) => {
+          console.error("[docker-runtime] kill failed", { containerName, error: (e as Error).message });
+        });
         child.kill("SIGKILL");
       }, timeoutSeconds * 1000);
 
-      child.stdout.on("data", (chunk: Buffer) => {
-        if (stdout.length < maxOutputBytes) {
-          const remaining = maxOutputBytes - stdout.length;
-          if (chunk.length <= remaining) {
-            stdout += chunk.toString("utf8");
-          } else {
-            stdout += chunk.subarray(0, remaining).toString("utf8");
-            stdoutTruncated = true;
-          }
-        } else {
-          stdoutTruncated = true;
+      const append = (chunks: Buffer[], current: number, chunk: Buffer): number => {
+        const remaining = maxOutputBytes - totalBytes;
+        if (remaining <= 0) {
+          truncated = true;
+          return current;
         }
+        const slice = chunk.length <= remaining ? chunk : chunk.subarray(0, remaining);
+        chunks.push(slice);
+        totalBytes += slice.length;
+        if (chunk.length > remaining) {
+          truncated = true;
+        }
+        return current + slice.length;
+      };
+
+      child.stdout.on("data", (chunk: Buffer) => {
+        stdoutBytes = append(stdoutChunks, stdoutBytes, chunk);
       });
       child.stderr.on("data", (chunk: Buffer) => {
-        if (stderr.length < maxOutputBytes) {
-          const remaining = maxOutputBytes - stderr.length;
-          if (chunk.length <= remaining) {
-            stderr += chunk.toString("utf8");
-          } else {
-            stderr += chunk.subarray(0, remaining).toString("utf8");
-            stderrTruncated = true;
-          }
-        } else {
-          stderrTruncated = true;
-        }
+        stderrBytes = append(stderrChunks, stderrBytes, chunk);
       });
 
       child.on("error", (err) => {
@@ -160,19 +182,22 @@ export class DockerRuntime implements ExecutionRuntime {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        let stdout = Buffer.concat(stdoutChunks).toString("utf8");
+        let stderr = Buffer.concat(stderrChunks).toString("utf8");
+        if (truncated) {
+          // Append marker only if budget remains; otherwise replace tail.
+          if (stdout.length + TRUNCATION_MARKER.length <= maxOutputBytes) {
+            stdout += TRUNCATION_MARKER;
+          }
+          if (stderr.length + TRUNCATION_MARKER.length <= maxOutputBytes) {
+            stderr += TRUNCATION_MARKER;
+          }
+        }
         if (timedOut) {
-          resolve({
-            exitCode: 124,
-            stdout: stdout + (stdoutTruncated ? "\n[output truncated]" : ""),
-            stderr: (stderr + (stderrTruncated ? "\n[output truncated]" : "")) + "\nexecution timed out",
-          });
+          resolve({ exitCode: 124, stdout, stderr: `${stderr}\nexecution timed out` });
           return;
         }
-        resolve({
-          exitCode: code ?? 1,
-          stdout: stdout + (stdoutTruncated ? "\n[output truncated]" : ""),
-          stderr: stderr + (stderrTruncated ? "\n[output truncated]" : ""),
-        });
+        resolve({ exitCode: code ?? 1, stdout, stderr });
       });
     });
   }

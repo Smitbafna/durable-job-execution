@@ -58,7 +58,7 @@ describe("docker execution", () => {
     const registry = new RuntimeRegistry();
     registry.register(
       "python:3.12",
-      new DockerRuntime(artifactConfig, loadDockerConfig(), loadExecutionConfig()),
+      new DockerRuntime(artifactConfig, loadDockerConfig()),
     );
     const worker = new Worker(
       { workerId: "d", pollIntervalMs: 50, concurrency: 1 } as any,

@@ -43,4 +43,15 @@ export class RuntimeRegistry {
   has(id: string): boolean {
     return this.runtimes.has(id);
   }
+
+  async shutdown(): Promise<void> {
+    await Promise.all(
+      [...this.runtimes.values()].map(async (runtime) => {
+        const maybeShutdown = (runtime as { shutdown?: () => Promise<void> }).shutdown;
+        if (typeof maybeShutdown === "function") {
+          await maybeShutdown.call(runtime);
+        }
+      }),
+    );
+  }
 }

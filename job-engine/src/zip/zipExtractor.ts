@@ -14,7 +14,7 @@ export async function extractZipToWorkspace(
 
   await fs.mkdir(workspaceDir, { recursive: true });
   let zip: yauzl.ZipFile | undefined;
-  const seen = new Set<string>();
+  const seen = new Map<string, "file" | "directory">();
   let entryCount = 0;
   let totalActual = 0;
   try {
@@ -31,24 +31,33 @@ export async function extractZipToWorkspace(
       if (isUnsafeEntryName(entry.fileName)) {
         throw new Error("unsafe entry path");
       }
-      const normalized = entry.fileName.replace(/\\/g, "/").replace(/\/+$/, "");
-      const lower = normalized.toLowerCase();
-      if (seen.has(lower)) {
-        throw new Error("duplicate entry");
-      }
-      seen.add(lower);
-
       const mode = (entry.externalFileAttributes >>> 16) & 0xffff;
       const type = mode & 0o170000;
       const creatorPlatform = entry.versionMadeBy >> 8;
       const isDir =
         entry.fileName.endsWith("/") ||
-        entry.fileName.endsWith("\\") ||
+        entry.fileName.endsWith("\\\\") ||
         (creatorPlatform === 3 && type === 0o040000) ||
         (creatorPlatform !== 3 && (entry.externalFileAttributes & 0x10) !== 0);
       if (creatorPlatform === 3 && type !== 0 && type !== 0o100000 && type !== 0o040000) {
         throw new Error("unsupported entry type");
       }
+
+      const normalized = entry.fileName.replace(/\\/g, "/").replace(/\/+$/, "");
+      const lower = normalized.toLowerCase();
+      if (seen.has(lower)) {
+        throw new Error("duplicate entry");
+      }
+      const entryType = isDir ? "directory" : "file";
+      for (const [existingPath, existingType] of seen) {
+        if (existingType === "file" && lower.startsWith(existingPath + "/")) {
+          throw new Error("conflicting entry paths");
+        }
+        if (entryType === "file" && existingPath.startsWith(lower + "/")) {
+          throw new Error("conflicting entry paths");
+        }
+      }
+      seen.set(lower, entryType);
 
       const target = path.resolve(workspaceDir, ...normalized.split("/"));
       const prefix = path.resolve(workspaceDir) + path.sep;
@@ -62,6 +71,12 @@ export async function extractZipToWorkspace(
       }
 
       await fs.mkdir(path.dirname(target), { recursive: true });
+      try {
+        await fs.access(target);
+        throw new Error("target file already exists");
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") throw e;
+      }
       const stream = await zip.openReadStreamPromise(entry);
       const writeStream = (await import("node:fs")).createWriteStream(target);
       let entryBytes = 0;
