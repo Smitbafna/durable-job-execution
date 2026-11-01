@@ -50,4 +50,5 @@ export interface Job {
   readonly attemptCount: number;
   readonly maxAttempts: number;
   readonly nextAttemptAt: Date | null;
+  readonly cancellationRequestedAt: Date | null;
 }

@@ -60,9 +60,14 @@ describe("leases and fencing (PostgreSQL)", () => {
        VALUES ($1, 'sum_numbers', 'running', $2, NULL, NULL, now(), now(), now(), 'w1', now() + interval '1 minute', 1)`,
       [id, JSON.stringify({})],
     );
-    expect(await repo.renewLease(id, "w1", 1, 30000)).toBe(true);
-    expect(await repo.renewLease(id, "w2", 1, 30000)).toBe(false);
-    expect(await repo.renewLease(id, "w1", 2, 30000)).toBe(false);
+    const renewed = await repo.renewLease(id, "w1", 1, 30000);
+    expect(renewed.renewed).toBe(true);
+    expect(renewed.cancellationRequested).toBe(false);
+    expect(renewed.cancelled).toBe(false);
+    const wrong = await repo.renewLease(id, "w2", 1, 30000);
+    expect(wrong.renewed).toBe(false);
+    const stale = await repo.renewLease(id, "w1", 2, 30000);
+    expect(stale.renewed).toBe(false);
   });
 
   it("stale worker cannot complete after reclaim", async () => {

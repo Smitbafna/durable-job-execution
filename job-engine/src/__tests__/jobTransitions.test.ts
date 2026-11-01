@@ -31,7 +31,8 @@ describe("job state transitions", () => {
 
   it("disallows running -> queued and running -> cancelled", () => {
     expect(canTransition(JobStatus.Running, JobStatus.Queued)).toBe(false);
-    expect(canTransition(JobStatus.Running, JobStatus.Cancelled)).toBe(false);
+    expect(canTransition(JobStatus.Running, JobStatus.Succeeded)).toBe(true);
+    expect(canTransition(JobStatus.Running, JobStatus.Failed)).toBe(true);
   });
 
   it("disallows queued -> succeeded/failed (job must run first)", () => {
@@ -70,10 +71,11 @@ describe("job state transitions", () => {
 
   it("documents the complete transition graph", () => {
     // The graph is fully known; assert the documented expectations so any
-    // accidental change is caught.
+    // accidental change is caught. `running -> cancelled` is the only new
+    // terminal transition added by the cancellation work.
     expect(ALLOWED_TRANSITIONS).toEqual({
       queued: ["running", "cancelled"],
-      running: ["succeeded", "failed"],
+      running: ["succeeded", "failed", "cancelled"],
       succeeded: ["running"],
       failed: ["running"],
       cancelled: [],

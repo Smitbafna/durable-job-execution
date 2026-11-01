@@ -83,5 +83,23 @@ export class JobService {
     return this.repo.getJobById(id);
   }
 
-  static readonly INITIAL_STATUS: JobStatus = JobStatus.Queued;
+  async cancelJob(id: string): Promise<Job> {
+    let job = await this.repo.getJobById(id);
+    if (job === null) {
+      throw new AppError(AppErrorCode.NotFound, 404, `Job not found: ${id}`);
+    }
+    if (job.status === JobStatus.Queued) {
+      const affected = await this.repo.cancelQueuedJob(id);
+      if (affected === 0) {
+        job = (await this.repo.getJobById(id)) ?? job;
+        if (job.status === JobStatus.Running) {
+          await this.repo.requestCancellation(id);
+        }
+      }
+    } else if (job.status === JobStatus.Running) {
+      await this.repo.requestCancellation(id);
+    }
+    const updated = await this.repo.getJobById(id);
+    return updated ?? job;
+  }
 }

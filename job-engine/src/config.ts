@@ -193,3 +193,11 @@ export function loadServerConfig(): ServerConfig {
     lease: loadLeaseConfig(),
   };
 }
+import type { RetryPolicyConfig } from "./domain/retryPolicy.js";
+import { DEFAULT_RETRY_POLICY_CONFIG } from "./domain/retryPolicy.js";
+export type { RetryPolicyConfig } from "./domain/retryPolicy.js";
+
+export function loadRetryPolicyConfig(): RetryPolicyConfig {
+  return DEFAULT_RETRY_POLICY_CONFIG;
+}
+

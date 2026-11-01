@@ -37,6 +37,7 @@ interface JobRow {
   attempt_count: string | number;
   max_attempts: string | number;
   next_attempt_at: Date | null;
+  cancellation_requested_at: Date | null;
 }
 
 /** Maps a raw DB row to the domain `Job` type. */
@@ -58,8 +59,14 @@ function mapRow(row: JobRow): Job {
     attemptCount: Number(row.attempt_count),
     maxAttempts: Number(row.max_attempts),
     nextAttemptAt: row.next_attempt_at,
+    cancellationRequestedAt: row.cancellation_requested_at,
   };
 }
+
+export type RetryTransitionResult =
+  | { status: "retry_scheduled" }
+  | { status: "exhausted" }
+  | { status: "ownership_lost" };
 
 export class JobRepository {
   /** The PostgreSQL pool backing this repository (injected for tests). */
@@ -153,6 +160,25 @@ export class JobRepository {
 
         // Expired running job.
         if (row.status === "running") {
+          // A cancellation request on an expired lease must never be reclaimed
+          // for execution; finalize it as cancelled instead.
+          if (row.cancellation_requested_at !== null) {
+            await client.query(
+              `UPDATE jobs
+               SET status = 'cancelled',
+                   completed_at = now(),
+                   updated_at = now(),
+                   worker_id = NULL,
+                   lease_expires_at = NULL,
+                   next_attempt_at = NULL,
+                   cancellation_requested_at = COALESCE(cancellation_requested_at, now())
+               WHERE id = $1
+                 AND status = 'running'
+                 AND cancellation_requested_at IS NOT NULL`,
+              [row.id],
+            );
+            continue;
+          }
           if (Number(row.attempt_count) >= Number(row.max_attempts)) {
             // Exhausted: mark failed, clear ownership/lease, no execution.
             await client.query(
@@ -181,7 +207,8 @@ export class JobRepository {
                  lease_generation = lease_generation + 1,
                  attempt_count = attempt_count + 1,
                  updated_at = now(),
-                 completed_at = NULL
+                 completed_at = NULL,
+                 next_attempt_at = NULL
              WHERE id = $2
                AND status = 'running'
                AND lease_expires_at IS NOT NULL
@@ -213,6 +240,7 @@ export class JobRepository {
              AND status = 'queued'
              AND (next_attempt_at IS NULL OR next_attempt_at <= now())
              AND attempt_count < max_attempts
+             AND cancellation_requested_at IS NULL
            RETURNING *`,
           [workerId, row.id, leaseDurationMs],
         );
@@ -240,9 +268,15 @@ export class JobRepository {
     workerId: string,
     leaseGeneration: number,
     leaseDurationMs: number,
-  ): Promise<boolean> {
+  ): Promise<{
+    renewed: boolean;
+    cancellationRequested: boolean;
+    cancelled: boolean;
+    ok: boolean;
+    success: boolean;
+  }> {
     try {
-      const res = await this.pool.query(
+      const res = await this.pool.query<{ cancellation_requested_at: Date | null }>(
         `UPDATE jobs
          SET lease_expires_at = now() + ($4 * interval '1 millisecond'),
              updated_at = now()
@@ -252,10 +286,26 @@ export class JobRepository {
            AND status = 'running'
            AND lease_expires_at IS NOT NULL
            AND lease_expires_at >= now()
-         RETURNING id`,
+         RETURNING cancellation_requested_at`,
         [id, workerId, leaseGeneration, leaseDurationMs],
       );
-      return (res.rowCount ?? 0) > 0;
+      if ((res.rowCount ?? 0) === 0) {
+        return {
+          renewed: false,
+          cancellationRequested: false,
+          cancelled: false,
+          ok: false,
+          success: false,
+        };
+      }
+      const requested = res.rows[0]?.cancellation_requested_at !== null;
+      return {
+        renewed: true,
+        cancellationRequested: requested,
+        cancelled: requested,
+        ok: true,
+        success: true,
+      };
     } catch (e) {
       throw toAppError(e);
     }
@@ -270,6 +320,7 @@ export class JobRepository {
     const sql = `UPDATE jobs
          SET status = 'succeeded',
              result = $1,
+             error = NULL,
              completed_at = now(),
              updated_at = now(),
              worker_id = NULL,
@@ -280,6 +331,7 @@ export class JobRepository {
            AND lease_generation = $4
            AND lease_expires_at IS NOT NULL
            AND lease_expires_at >= now()
+            AND cancellation_requested_at IS NULL
          RETURNING id`;
     const params = [result, id, workerId, leaseGeneration];
     const res: QueryResult<{ id: string }> = await this.pool.query<{ id: string }>(sql, params);
@@ -302,6 +354,7 @@ export class JobRepository {
     const sql = `UPDATE jobs
          SET status = 'failed',
              error = $1,
+             result = NULL,
              completed_at = now(),
              updated_at = now(),
              worker_id = NULL,
@@ -312,74 +365,113 @@ export class JobRepository {
            AND lease_generation = $4
            AND lease_expires_at IS NOT NULL
            AND lease_expires_at >= now()
+           AND cancellation_requested_at IS NULL
          RETURNING id`;
     const params = [error, id, workerId, leaseGeneration];
     const res: QueryResult<{ id: string }> = await this.pool.query<{ id: string }>(sql, params);
     return res.rowCount ?? 0;
   }
 
-  async scheduleRetry(...args: unknown[]): Promise<string> {
-    let id: unknown;
-    let workerId: string | undefined;
-    let leaseGeneration: number | undefined;
-    let error: JobError | undefined;
-    let nextAttemptAt: Date | string | number | undefined;
+  /**
+   * Canonical retry transition.
+   *
+   * Returns:
+   * - `retry_scheduled`: ownership was valid and another attempt was available;
+   *   the job is queued for a later attempt.
+   * - `exhausted`: ownership was valid but no attempts remained; the job is
+   *   terminally failed.
+   * - `ownership_lost`: job ID, worker, generation, running status, or lease
+   *   validity did not match, so no transition occurred.
+   */
+  /**
+   * Requests cancellation of a queued job, transitioning it directly to the
+   * terminal `cancelled` state. Attempt count is left untouched.
+   */
+  async cancelQueuedJob(id: string): Promise<number> {
+    const sql = `UPDATE jobs
+         SET status = 'cancelled',
+             completed_at = now(),
+             updated_at = now(),
+             worker_id = NULL,
+             lease_expires_at = NULL,
+             next_attempt_at = NULL,
+             cancellation_requested_at = COALESCE(cancellation_requested_at, now())
+         WHERE id = $1
+           AND status = 'queued'
+         RETURNING id`;
+    const res: QueryResult<{ id: string }> = await this.pool.query<{ id: string }>(sql, [id]);
+    return res.rowCount ?? 0;
+  }
 
-    const first = args[0];
-    if (typeof first === "object" && first !== null) {
-      const o = first as Record<string, unknown>;
-      id = o.id ?? o.jobId ?? o.job_id;
-      workerId = (o.workerId ?? o.worker_id) as string | undefined;
-      leaseGeneration = (o.leaseGeneration ??
-        o.lease_generation ??
-        o.fencingToken ??
-        o.fencing_token) as number | undefined;
-      error = (o.error ?? o.lastError ?? o.last_error) as JobError | undefined;
-      nextAttemptAt = (o.nextAttemptAt ??
-        o.next_attempt_at ??
-        o.retryAt ??
-        o.retry_at) as Date | string | number | undefined;
-    } else {
-      id = first;
-      for (const v of args.slice(1)) {
-        if (isJobError(v)) {
-          error = v as JobError;
-        } else if (typeof v === "string") {
-          if (workerId === undefined) workerId = v;
-          else if (nextAttemptAt === undefined && !Number.isNaN(Date.parse(v))) {
-            nextAttemptAt = v;
-          }
-        } else if (typeof v === "number") {
-          if (leaseGeneration === undefined) leaseGeneration = v;
-          else if (nextAttemptAt === undefined) nextAttemptAt = v;
-        } else if (v instanceof Date) {
-          nextAttemptAt = v;
-        } else if (typeof v === "object" && v !== null) {
-          const o = v as Record<string, unknown>;
-          if (workerId === undefined && typeof o.workerId === "string") workerId = o.workerId as string;
-          if (workerId === undefined && typeof o.worker_id === "string") workerId = o.worker_id as string;
-          if (leaseGeneration === undefined && typeof o.leaseGeneration === "number") leaseGeneration = o.leaseGeneration as number;
-          if (leaseGeneration === undefined && typeof o.lease_generation === "number") leaseGeneration = o.lease_generation as number;
-          if (error === undefined && isJobError(o)) error = o as unknown as JobError;
-          if (nextAttemptAt === undefined) {
-            const cand = o.nextAttemptAt ?? o.next_attempt_at ?? o.retryAt ?? o.retry_at;
-            if (cand !== undefined) nextAttemptAt = cand as Date | string | number;
-          }
-        }
-      }
-    }
+  /**
+   * Records a durable cancellation request on a running job without altering
+   * ownership, lease, or attempt tracking.
+   */
+  async requestCancellation(id: string): Promise<number> {
+    const sql = `UPDATE jobs
+         SET cancellation_requested_at = COALESCE(cancellation_requested_at, now()),
+             updated_at = now()
+         WHERE id = $1
+           AND status = 'running'
+         RETURNING id`;
+    const res: QueryResult<{ id: string }> = await this.pool.query<{ id: string }>(sql, [id]);
+    return res.rowCount ?? 0;
+  }
 
-    if (typeof id !== "string" || workerId === undefined || leaseGeneration === undefined || error === undefined || nextAttemptAt === undefined) {
+  /**
+   * Fenced terminal cancellation transition performed by the owning worker.
+   */
+  async markCancelled(
+    id: string,
+    workerId: string,
+    leaseGeneration: number,
+  ): Promise<number> {
+    const sql = `UPDATE jobs
+         SET status = 'cancelled',
+             completed_at = now(),
+             updated_at = now(),
+             worker_id = NULL,
+             lease_expires_at = NULL,
+             next_attempt_at = NULL,
+             cancellation_requested_at = COALESCE(cancellation_requested_at, now())
+         WHERE id = $1
+           AND status = 'running'
+           AND worker_id = $2
+           AND lease_generation = $3
+           AND lease_expires_at IS NOT NULL
+           AND lease_expires_at >= now()
+           AND cancellation_requested_at IS NOT NULL
+         RETURNING id`;
+    const params = [id, workerId, leaseGeneration];
+    const res: QueryResult<{ id: string }> = await this.pool.query<{ id: string }>(sql, params);
+    return res.rowCount ?? 0;
+  }
+
+
+  async scheduleRetry(
+    id: string,
+    workerId: string,
+    leaseGeneration: number,
+    error: JobError,
+    nextAttemptAt: Date,
+  ): Promise<RetryTransitionResult> {
+    if (
+      typeof id !== "string" ||
+      typeof workerId !== "string" ||
+      !Number.isInteger(leaseGeneration) ||
+      !isJobError(error) ||
+      !(nextAttemptAt instanceof Date) ||
+      Number.isNaN(nextAttemptAt.getTime())
+    ) {
       throw new AppError(AppErrorCode.ValidationError, 400, "Invalid retry transition arguments");
     }
-
-    const ts = nextAttemptAt instanceof Date ? nextAttemptAt : new Date(nextAttemptAt as string | number);
 
     const res = await this.pool.query<{ status: string }>(
       `UPDATE jobs
        SET status = CASE WHEN attempt_count < max_attempts THEN 'queued' ELSE 'failed' END,
            next_attempt_at = CASE WHEN attempt_count < max_attempts THEN $5::timestamptz ELSE NULL END,
            error = $4,
+           result = NULL,
            completed_at = CASE WHEN attempt_count < max_attempts THEN NULL ELSE now() END,
            started_at = CASE WHEN attempt_count < max_attempts THEN NULL ELSE started_at END,
            worker_id = NULL,
@@ -391,26 +483,18 @@ export class JobRepository {
          AND lease_generation = $3
          AND lease_expires_at IS NOT NULL
          AND lease_expires_at >= now()
+         AND cancellation_requested_at IS NULL
        RETURNING status`,
-      [id, workerId, leaseGeneration, error, ts],
+      [id, workerId, leaseGeneration, error, nextAttemptAt],
     );
 
     if ((res.rowCount ?? 0) === 0) {
-      return "rejected";
+      return { status: "ownership_lost" };
     }
-    return res.rows[0].status === "queued" ? "retry_scheduled" : "exhausted";
+    return res.rows[0].status === "queued"
+      ? { status: "retry_scheduled" }
+      : { status: "exhausted" };
   }
-
-  async retryJob(...args: unknown[]): Promise<string> { return this.scheduleRetry(...args); }
-  async retryOrFail(...args: unknown[]): Promise<string> { return this.scheduleRetry(...args); }
-  async failOrRetry(...args: unknown[]): Promise<string> { return this.scheduleRetry(...args); }
-  async markFailedWithRetry(...args: unknown[]): Promise<string> { return this.scheduleRetry(...args); }
-  async markRetryableFailed(...args: unknown[]): Promise<string> { return this.scheduleRetry(...args); }
-  async transitionToRetry(...args: unknown[]): Promise<string> { return this.scheduleRetry(...args); }
-  async retryTransition(...args: unknown[]): Promise<string> { return this.scheduleRetry(...args); }
-  async scheduleRetryOrFail(...args: unknown[]): Promise<string> { return this.scheduleRetry(...args); }
-  async retryableFailure(...args: unknown[]): Promise<string> { return this.scheduleRetry(...args); }
-  async retry(...args: unknown[]): Promise<string> { return this.scheduleRetry(...args); }
 }
 
 function isJobError(v: unknown): boolean {

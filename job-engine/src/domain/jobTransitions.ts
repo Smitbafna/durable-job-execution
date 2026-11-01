@@ -23,7 +23,7 @@ export const ALLOWED_TRANSITIONS: Readonly<
   Record<JobStatus, readonly JobStatus[]>
 > = {
   [JobStatus.Queued]: [JobStatus.Running, JobStatus.Cancelled],
-  [JobStatus.Running]: [JobStatus.Succeeded, JobStatus.Failed],
+  [JobStatus.Running]: [JobStatus.Succeeded, JobStatus.Failed, JobStatus.Cancelled],
   [JobStatus.Succeeded]: [JobStatus.Running],
   [JobStatus.Failed]: [JobStatus.Running],
   [JobStatus.Cancelled]: [],

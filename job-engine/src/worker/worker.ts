@@ -25,6 +25,9 @@ import type { WorkerConfig, LeaseConfig } from "../config.js";
 import type { ArtifactService } from "../service/artifactService.js";
 import { RuntimeRegistry, PlaceholderRuntime } from "../runtime/executionRuntime.js";
 import { validateExecutionSpec } from "../domain/executionSpec.js";
+import { classifyFailure } from "../domain/failureClassification.js";
+import { decideRetry, DEFAULT_RETRY_POLICY_CONFIG } from "../domain/retryPolicy.js";
+import type { RetryPolicyConfig } from "../domain/retryPolicy.js";
 import type { ExecutionLimits } from "../domain/executionSpec.js";
 import { DEFAULT_EXECUTION_LIMITS } from "../domain/executionSpec.js";
 
@@ -45,6 +48,8 @@ export class Worker {
   private readonly heartbeatStates = new Map<string, any>();
   private readonly ownershipLost = new Set<string>();
   private readonly abortControllers = new Map<string, AbortController>();
+  private readonly cancelledJobs = new Set<string>();
+  private retryPolicyConfig: RetryPolicyConfig = DEFAULT_RETRY_POLICY_CONFIG;
 
   constructor(
     private readonly config: WorkerConfig,
@@ -60,6 +65,7 @@ export class Worker {
     artifactService?: ArtifactService,
     executionLimits?: ExecutionLimits,
     leaseConfig?: LeaseConfig,
+    retryPolicyConfig?: RetryPolicyConfig,
   ) {
     if (runtimeRegistryOrOptions instanceof RuntimeRegistry) {
       this.runtimeRegistry = runtimeRegistryOrOptions;
@@ -77,6 +83,7 @@ export class Worker {
     } else if (leaseConfig) {
       this.leaseConfig = leaseConfig;
     }
+    this.retryPolicyConfig = retryPolicyConfig ?? DEFAULT_RETRY_POLICY_CONFIG;
   }
 
 
@@ -186,29 +193,35 @@ export class Worker {
 
     try {
       const result = await handler(job.payload);
+      if (this.cancelledJobs.has(job.id)) {
+        const affected = await this.repo.markCancelled(
+          job.id,
+          this.config.workerId,
+          job.leaseGeneration,
+        );
+        this.maybeLogConsistencyError("markCancelled", job.id, affected);
+        return;
+      }
       if (this.ownershipLost.has(job.id)) return;
-      const affected = await this.repo.markSucceeded(job.id, result, this.config.workerId, job.leaseGeneration);
+      const affected = await this.repo.markSucceeded(
+        job.id,
+        result,
+        this.config.workerId,
+        job.leaseGeneration,
+      );
       this.maybeLogConsistencyError("markSucceeded", job.id, affected);
     } catch (err) {
+      if (this.cancelledJobs.has(job.id)) {
+        const affected = await this.repo.markCancelled(
+          job.id,
+          this.config.workerId,
+          job.leaseGeneration,
+        );
+        this.maybeLogConsistencyError("markCancelled", job.id, affected);
+        return;
+      }
       if (this.ownershipLost.has(job.id)) return;
-      const appError = err instanceof AppError ? err : this.sanitizeError(err);
-
-      this.logger.error(
-        `Job id ${job.id} (${job.type}) failed; persisting error.`,
-        {
-          jobId: job.id,
-          type: job.type,
-          code: appError.code,
-          error: appError.message,
-        },
-      );
-
-      const affected = await this.repo.markFailed(job.id, {
-        code: appError.code,
-        message: appError.message,
-        details: appError.details,
-      }, this.config.workerId, job.leaseGeneration);
-      this.maybeLogConsistencyError("markFailed", job.id, affected);
+      await this.persistFailure(job, err);
     }
   }
 
@@ -264,23 +277,47 @@ export class Worker {
       tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "job-engine-artifact-"));
       const artifactPath = path.join(tempDir, "artifact.zip");
       await this.artifactService.materializeArtifact(spec.artifactId, artifactPath);
-      const result = await runtime.execute(spec, artifactPath, { signal: abortController.signal });
-      const affected = await this.repo.markSucceeded(job.id, result, this.config.workerId, job.leaseGeneration);
+      if (this.cancelledJobs.has(job.id)) {
+        const affected = await this.repo.markCancelled(
+          job.id,
+          this.config.workerId,
+          job.leaseGeneration,
+        );
+        this.maybeLogConsistencyError("markCancelled", job.id, affected);
+        return;
+      }
+      const result = await runtime.execute(spec, artifactPath, {
+        signal: abortController.signal,
+      });
+      if (this.cancelledJobs.has(job.id)) {
+        const affected = await this.repo.markCancelled(
+          job.id,
+          this.config.workerId,
+          job.leaseGeneration,
+        );
+        this.maybeLogConsistencyError("markCancelled", job.id, affected);
+        return;
+      }
+      if (this.ownershipLost.has(job.id)) return;
+      const affected = await this.repo.markSucceeded(
+        job.id,
+        result,
+        this.config.workerId,
+        job.leaseGeneration,
+      );
       this.maybeLogConsistencyError("markSucceeded", job.id, affected);
     } catch (err) {
+      if (this.cancelledJobs.has(job.id)) {
+        const affected = await this.repo.markCancelled(
+          job.id,
+          this.config.workerId,
+          job.leaseGeneration,
+        );
+        this.maybeLogConsistencyError("markCancelled", job.id, affected);
+        return;
+      }
       if (this.ownershipLost.has(job.id)) return;
-      const appError = err instanceof AppError ? err : this.sanitizeError(err);
-      this.logger.error(
-        `Job id ${job.id} (execute_artifact) failed; persisting error.`,
-        { jobId: job.id, type: job.type, code: appError.code },
-        err,
-      );
-      const affected = await this.repo.markFailed(job.id, {
-        code: appError.code,
-        message: appError.message,
-        details: appError.details,
-      }, this.config.workerId, job.leaseGeneration);
-      this.maybeLogConsistencyError("markFailed", job.id, affected);
+      await this.persistFailure(job, err);
     } finally {
       if (tempDir) {
         await fs.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
@@ -348,14 +385,30 @@ export class Worker {
         this.failHeartbeat(job, state, "lease safety deadline reached");
         return;
       }
-      const ok = await this.repo.renewLease(
+      const renewal = await this.repo.renewLease(
         job.id,
         this.config.workerId,
         job.leaseGeneration,
         this.leaseConfig.leaseDurationMs,
       );
       if (state.stopped) return;
-      if (ok) {
+      const cancelled = this.isRenewalCancelled(renewal);
+      const renewed = this.isRenewalOk(renewal);
+      if (cancelled) {
+        if (!state.stopped) {
+          state.stopped = true;
+          if (state.timer) clearTimeout(state.timer);
+          state.timer = undefined;
+          this.heartbeats.delete(job.id);
+          this.cancelledJobs.add(job.id);
+          this.abortControllers.get(job.id)?.abort();
+          void this.repo
+            .markCancelled(job.id, this.config.workerId, job.leaseGeneration)
+            .catch(() => undefined);
+        }
+        return;
+      }
+      if (renewed) {
         state.consecutiveFailures = 0;
         state.lastRenewalStartedAt = renewalStartedAt;
         this.scheduleHeartbeat(job, state, this.leaseConfig.heartbeatIntervalMs, safetyWindowMs, abortController);
@@ -432,6 +485,25 @@ export class Worker {
     this.logger.error(`Heartbeat failed for job ${job.id}: ${reason}`, { jobId: job.id });
   }
 
+  private isRenewalCancelled(value: unknown): boolean {
+    if (value && typeof value === "object") {
+      const r = value as Record<string, unknown>;
+      return r.cancellationRequested === true || r.cancelled === true;
+    }
+    return false;
+  }
+
+  private isRenewalOk(value: unknown): boolean {
+    if (typeof value === "boolean") return value;
+    if (value && typeof value === "object") {
+      const r = value as Record<string, unknown>;
+      if (typeof r.renewed === "boolean") return r.renewed;
+      if (typeof r.ok === "boolean") return r.ok;
+      if (typeof r.success === "boolean") return r.success;
+    }
+    return !!value;
+  }
+
   private stopHeartbeat(jobId: string): void {
     const state = this.heartbeatStates.get(jobId);
     if (state) {
@@ -463,6 +535,68 @@ export class Worker {
    * Stack traces, SQL, credentials, and internal details never leave the
    * process; only a sanitized message is stored.
    */
+  private async persistFailure(job: Job, err: unknown): Promise<void> {
+    if (this.cancelledJobs.has(job.id)) {
+      const affected = await this.repo.markCancelled(
+        job.id,
+        this.config.workerId,
+        job.leaseGeneration,
+      );
+      this.maybeLogConsistencyError("markCancelled", job.id, affected);
+      return;
+    }
+    if (this.ownershipLost.has(job.id)) return;
+    const appError = err instanceof AppError ? err : this.sanitizeError(err);
+
+    this.logger.error(
+      `Job id ${job.id} (${job.type}) failed; persisting error.`,
+      {
+        jobId: job.id,
+        type: job.type,
+        code: appError.code,
+        error: appError.message,
+      },
+      err,
+    );
+
+    const classification = classifyFailure(err);
+    const decision = decideRetry({
+      classification,
+      attemptCount: job.attemptCount,
+      maxAttempts: job.maxAttempts,
+      config: this.retryPolicyConfig,
+    });
+
+    if (decision.decision === "retry") {
+      const affected = await this.repo.scheduleRetry(
+        job.id,
+        this.config.workerId,
+        job.leaseGeneration,
+        {
+          code: appError.code,
+          message: appError.message,
+          details: appError.details,
+        },
+        decision.nextAttemptAt,
+      );
+      if (affected.status === "ownership_lost") {
+        // Stale worker or already terminal; do not treat as fatal.
+      }
+      return;
+    }
+
+    const affected = await this.repo.markFailed(
+      job.id,
+      {
+        code: appError.code,
+        message: appError.message,
+        details: appError.details,
+      },
+      this.config.workerId,
+      job.leaseGeneration,
+    );
+    this.maybeLogConsistencyError("markFailed", job.id, affected);
+  }
   private sanitizeError(err: unknown): AppError {
     const message =
       err instanceof Error

@@ -25,9 +25,10 @@ function makeJob(): Job {
     leaseExpiresAt: new Date(Date.now() + 30000),
     leaseGeneration: 1,
     fencingToken: 1,
-     attemptCount: 1,
-     maxAttempts: 3,
-     nextAttemptAt: null,
+    cancellationRequestedAt: null,
+    attemptCount: 1,
+    maxAttempts: 3,
+    nextAttemptAt: null,
   };
 }
 

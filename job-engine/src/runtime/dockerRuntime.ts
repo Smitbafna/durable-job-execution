@@ -38,8 +38,10 @@ export class DockerRuntime implements ExecutionRuntime {
     let aborted = false;
     const abortHandler = () => {
       aborted = true;
-      void execFileAsync("docker", ["kill", containerName]).catch(() => undefined);
-      void execFileAsync("docker", ["rm", "-f", containerName]).catch(() => undefined);
+      void execFileAsync("docker", ["kill", containerName])
+        .catch((e) => console.error("[docker-runtime] kill failed", { containerName, error: (e as Error).message }));
+      void execFileAsync("docker", ["rm", "-f", containerName])
+        .catch((e) => console.error("[docker-runtime] cleanup failed", { containerName, error: (e as Error).message }));
     };
     options?.signal?.addEventListener("abort", abortHandler, { once: true });
     try {
@@ -124,7 +126,14 @@ export class DockerRuntime implements ExecutionRuntime {
         console.error("[docker-runtime] cleanup failed", { containerName, error: (e as Error).message });
       });
       if (err instanceof AppError) throw err;
-      throw new AppError(AppErrorCode.Internal, 500, `Docker execution failed: ${(err as Error).message}`);
+      const message = (err as Error).message;
+      const retryable = /docker daemon|cannot connect|connection refused|econnrefused|enoent|temporary|service unavailable/i.test(
+        message.toLowerCase(),
+      );
+      throw new AppError(AppErrorCode.Internal, 500, `Docker execution failed: ${message}`, {
+        retryable,
+        failureKind: retryable ? "docker_infrastructure" : "docker_execution",
+      });
     } finally {
       options?.signal?.removeEventListener("abort", abortHandler);
       this.activeContainers.delete(containerName);
@@ -162,8 +171,12 @@ export class DockerRuntime implements ExecutionRuntime {
         if (settled) return;
         aborted = true;
         abortCleanup = (async () => {
-          await execFileAsync("docker", ["kill", containerName]).catch(() => undefined);
-          await execFileAsync("docker", ["rm", "-f", containerName]).catch(() => undefined);
+          await execFileAsync("docker", ["kill", containerName]).catch((e) =>
+            console.error("[docker-runtime] kill failed", { containerName, error: (e as Error).message }),
+          );
+          await execFileAsync("docker", ["rm", "-f", containerName]).catch((e) =>
+            console.error("[docker-runtime] cleanup failed", { containerName, error: (e as Error).message }),
+          );
         })();
       };
       signal?.addEventListener("abort", abortHandler, { once: true });

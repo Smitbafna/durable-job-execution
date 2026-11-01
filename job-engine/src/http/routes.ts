@@ -20,7 +20,22 @@ export function jobRoutes(service: JobService): Router {
   const router = Router();
   router.post("/", createJobHandler(service));
   router.get("/:id", getJobHandler(service));
+  router.post("/:id/cancel", cancelJobHandler(service));
   return router;
+}
+
+function cancelJobHandler(service: JobService) {
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const idOrErr = validateJobId(req.params.id);
+      if (idOrErr instanceof AppError) return next(idOrErr);
+
+      const job = await service.cancelJob(idOrErr);
+      res.json(serializeJob(job));
+    } catch (e) {
+      next(e);
+    }
+  };
 }
 
 function createJobHandler(service: JobService) {

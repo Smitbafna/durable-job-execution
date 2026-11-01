@@ -22,6 +22,7 @@ export interface JobResponse {
   readonly attemptCount: number;
   readonly maxAttempts: number;
   readonly nextAttemptAt: string | null;
+  readonly cancellationRequestedAt: string | null;
 }
 
 export function serializeJob(job: Job): JobResponse {
@@ -39,6 +40,9 @@ export function serializeJob(job: Job): JobResponse {
     attemptCount: job.attemptCount,
     maxAttempts: job.maxAttempts,
     nextAttemptAt: job.nextAttemptAt ? job.nextAttemptAt.toISOString() : null,
+    cancellationRequestedAt: job.cancellationRequestedAt
+      ? job.cancellationRequestedAt.toISOString()
+      : null,
   };
 }
 
