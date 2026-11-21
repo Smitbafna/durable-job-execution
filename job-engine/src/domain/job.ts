@@ -14,6 +14,7 @@ export enum JobStatus {
   Succeeded = "succeeded",
   Failed = "failed",
   Cancelled = "cancelled",
+  WaitingForRetry = "waiting_for_retry",
 }
 
 export const ALL_JOB_STATUSES: readonly JobStatus[] = [
@@ -51,4 +52,7 @@ export interface Job {
   readonly maxAttempts: number;
   readonly nextAttemptAt: Date | null;
   readonly cancellationRequestedAt: Date | null;
+  readonly exitCode?: number | null;
+  readonly stdout?: string | null;
+  readonly stderr?: string | null;
 }

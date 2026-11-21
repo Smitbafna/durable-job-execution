@@ -344,24 +344,30 @@ export class JobRepository {
     result: unknown,
     workerId: string,
     leaseGeneration: number,
+    exitCode: number | null = null,
+    stdout: string | null = null,
+    stderr: string | null = null,
   ): Promise<number> {
     const sql = `UPDATE jobs
          SET status = 'succeeded',
              result = $1,
+             exit_code = $2,
+             stdout = $3,
+             stderr = $4,
              error = NULL,
              completed_at = now(),
              updated_at = now(),
              worker_id = NULL,
              lease_expires_at = NULL
-         WHERE id = $2
+         WHERE id = $5
            AND status = 'running'
-           AND worker_id = $3
-           AND lease_generation = $4
+           AND worker_id = $6
+           AND lease_generation = $7
            AND lease_expires_at IS NOT NULL
            AND lease_expires_at >= now()
             AND cancellation_requested_at IS NULL
          RETURNING id`;
-    const params = [result, id, workerId, leaseGeneration];
+    const params = [result, exitCode, stdout, stderr, id, workerId, leaseGeneration];
     const res: QueryResult<{ id: string }> = await this.pool.query<{ id: string }>(sql, params);
     return res.rowCount ?? 0;
   }
@@ -378,24 +384,30 @@ export class JobRepository {
     error: JobError,
     workerId: string,
     leaseGeneration: number,
+    exitCode: number | null = null,
+    stdout: string | null = null,
+    stderr: string | null = null,
   ): Promise<number> {
     const sql = `UPDATE jobs
          SET status = 'failed',
              error = $1,
+             exit_code = $2,
+             stdout = $3,
+             stderr = $4,
              result = NULL,
              completed_at = now(),
              updated_at = now(),
              worker_id = NULL,
              lease_expires_at = NULL
-         WHERE id = $2
+         WHERE id = $5
            AND status = 'running'
-           AND worker_id = $3
-           AND lease_generation = $4
+           AND worker_id = $6
+           AND lease_generation = $7
            AND lease_expires_at IS NOT NULL
            AND lease_expires_at >= now()
            AND cancellation_requested_at IS NULL
          RETURNING id`;
-    const params = [error, id, workerId, leaseGeneration];
+    const params = [error, exitCode, stdout, stderr, id, workerId, leaseGeneration];
     const res: QueryResult<{ id: string }> = await this.pool.query<{ id: string }>(sql, params);
     return res.rowCount ?? 0;
   }

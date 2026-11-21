@@ -19,10 +19,13 @@ export interface JobResponse {
   readonly updatedAt: string;
   readonly startedAt: string | null;
   readonly completedAt: string | null;
+  readonly exitCode: number | null;
   readonly attemptCount: number;
   readonly maxAttempts: number;
   readonly nextAttemptAt: string | null;
   readonly cancellationRequestedAt: string | null;
+  readonly stdout: string | null;
+  readonly stderr: string | null;
 }
 
 export function serializeJob(job: Job): JobResponse {
@@ -37,12 +40,15 @@ export function serializeJob(job: Job): JobResponse {
     updatedAt: job.updatedAt.toISOString(),
     startedAt: job.startedAt ? job.startedAt.toISOString() : null,
     completedAt: job.completedAt ? job.completedAt.toISOString() : null,
+    exitCode: job.exitCode ?? null,
     attemptCount: job.attemptCount,
     maxAttempts: job.maxAttempts,
     nextAttemptAt: job.nextAttemptAt ? job.nextAttemptAt.toISOString() : null,
     cancellationRequestedAt: job.cancellationRequestedAt
       ? job.cancellationRequestedAt.toISOString()
       : null,
+    stdout: job.stdout as string | null,
+    stderr: job.stderr as string | null,
   };
 }
 

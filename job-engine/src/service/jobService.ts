@@ -15,14 +15,15 @@ export interface SubmitJobCommand {
   readonly maxAttempts?: number;
 }
 
-function computeFingerprint(type: string, payload: unknown, maxAttempts?: number): string {
+export function computeFingerprint(type: string, payload: unknown, maxAttempts?: number): string {
   return canonicalStringify({ type, payload, maxAttempts });
 }
 
-function canonicalStringify(value: unknown): string {
+export function canonicalStringify(value: unknown): string {
   if (value === null) return 'null';
-  if (typeof value === 'number') return String(value);
+  if (typeof value === 'number') return `NUM:${String(value)}`;
   if (typeof value === 'boolean') return value ? 'true' : 'false';
+  if (typeof value === 'string') return `STR:${value}`;
   if (Array.isArray(value)) {
     return '[' + value.map(canonicalStringify).join(',') + ']';
   }

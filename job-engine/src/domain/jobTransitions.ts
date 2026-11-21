@@ -23,10 +23,11 @@ export const ALLOWED_TRANSITIONS: Readonly<
   Record<JobStatus, readonly JobStatus[]>
 > = {
   [JobStatus.Queued]: [JobStatus.Running, JobStatus.Cancelled],
-  [JobStatus.Running]: [JobStatus.Succeeded, JobStatus.Failed, JobStatus.Cancelled],
-  [JobStatus.Succeeded]: [JobStatus.Running],
-  [JobStatus.Failed]: [JobStatus.Running],
+  [JobStatus.Running]: [JobStatus.Succeeded, JobStatus.Failed, JobStatus.Cancelled, JobStatus.WaitingForRetry],
+  [JobStatus.Succeeded]: [JobStatus.Running, JobStatus.WaitingForRetry],
+  [JobStatus.Failed]: [JobStatus.Running, JobStatus.WaitingForRetry],
   [JobStatus.Cancelled]: [],
+  [JobStatus.WaitingForRetry]: [JobStatus.Running],
 } as const;
 
 /** Returns true iff a transition from `from` to `to` is permitted. */
