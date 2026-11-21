@@ -18,11 +18,40 @@ const TRUNCATION_MARKER = "\n[output truncated]";
 
 export class DockerRuntime implements ExecutionRuntime {
   private readonly activeContainers = new Set<string>();
+  // Per-execution cleanup state, keyed by container name.
+  private cleanupPromises = new Map<string, Promise<void> | null>();
 
   constructor(
     private readonly artifactConfig: ArtifactConfig,
     private readonly dockerConfig: DockerConfig,
   ) {}
+
+  getCancellationCleanupPromise(containerName: string): Promise<void> | null {
+    return this.cleanupPromises.get(containerName) || null;
+  }
+
+  /**
+   * Idempotent kill-and-remove for a container. Errors are logged rather than
+   * propagated, so a single failing command can never abort the other.
+   */
+  private async _doKillAndRemove(containerName: string): Promise<void> {
+    try {
+      await execFileAsync("docker", ["kill", containerName]);
+    } catch (e) {
+      console.error(
+        "[docker-runtime] kill failed",
+        { containerName, error: (e as Error).message },
+      );
+    }
+    try {
+      await execFileAsync("docker", ["rm", "-f", containerName]);
+    } catch (e) {
+      console.error(
+        "[docker-runtime] cleanup failed",
+        { containerName, error: (e as Error).message },
+      );
+    }
+  }
 
   async execute(
     spec: ExecutionSpec,
@@ -38,10 +67,15 @@ export class DockerRuntime implements ExecutionRuntime {
     let aborted = false;
     const abortHandler = () => {
       aborted = true;
-      void execFileAsync("docker", ["kill", containerName])
-        .catch((e) => console.error("[docker-runtime] kill failed", { containerName, error: (e as Error).message }));
-      void execFileAsync("docker", ["rm", "-f", containerName])
-        .catch((e) => console.error("[docker-runtime] cleanup failed", { containerName, error: (e as Error).message }));
+      // Reuse the same cleanup promise if it already exists; otherwise create
+      // new. `_doKillAndRemove` logs each command failure so a kill/removal
+      // failure can never prevent the other step from running.
+      if (!this.cleanupPromises.has(containerName)) {
+        this.cleanupPromises.set(
+          containerName,
+          this._doKillAndRemove(containerName),
+        );
+      }
     };
     options?.signal?.addEventListener("abort", abortHandler, { once: true });
     try {
@@ -111,6 +145,15 @@ export class DockerRuntime implements ExecutionRuntime {
       ];
 
       if (aborted || options?.signal?.aborted) {
+        // Trigger cleanup if not already started. `_doKillAndRemove` logs each
+        // command failure so a kill/removal failure can never prevent the other
+        // step from running.
+        if (!this.cleanupPromises.has(containerName)) {
+          this.cleanupPromises.set(
+            containerName,
+            this._doKillAndRemove(containerName),
+          );
+        }
         throw new Error("execution cancelled");
       }
       const result = await this.runContainer(args, containerName, spec.resources.timeoutSeconds, this.dockerConfig.maxOutputBytes, options?.signal);
@@ -122,9 +165,11 @@ export class DockerRuntime implements ExecutionRuntime {
       };
     } catch (err) {
       options?.signal?.removeEventListener("abort", abortHandler);
-      await execFileAsync("docker", ["rm", "-f", containerName]).catch((e) => {
-        console.error("[docker-runtime] cleanup failed", { containerName, error: (e as Error).message });
-      });
+      // Await cleanup promise if it exists (from abort handler or startup cancellation).
+      const cleanupPromise = this.cleanupPromises.get(containerName);
+      if (cleanupPromise) {
+        await cleanupPromise;
+      }
       if (err instanceof AppError) throw err;
       const message = (err as Error).message;
       const retryable = /docker daemon|cannot connect|connection refused|econnrefused|enoent|temporary|service unavailable/i.test(
@@ -136,6 +181,8 @@ export class DockerRuntime implements ExecutionRuntime {
       });
     } finally {
       options?.signal?.removeEventListener("abort", abortHandler);
+      // Clean up tracking state.
+      this.cleanupPromises.delete(containerName);
       this.activeContainers.delete(containerName);
       await fs.rm(workspace, { recursive: true, force: true }).catch((e) => {
         console.error("[docker-runtime] workspace cleanup failed", { workspace, error: (e as Error).message });
@@ -144,17 +191,41 @@ export class DockerRuntime implements ExecutionRuntime {
   }
 
   async shutdown(): Promise<void> {
-    await Promise.all(
-      [...this.activeContainers].map(async (name) => {
-        await execFileAsync("docker", ["kill", name]).catch((e) => {
-          console.error("[docker-runtime] kill failed", { containerName: name, error: (e as Error).message });
-        });
-        await execFileAsync("docker", ["rm", "-f", name]).catch((e) => {
-          console.error("[docker-runtime] cleanup failed", { containerName: name, error: (e as Error).message });
-        });
-      }),
-    );
+    // Snapshot active containers. Containers that finish cleanly between the
+    // snapshot and this point are already gone from `activeContainers` and were
+    // cleaned up by their own `execute()` finally blocks.
+    const names = [...this.activeContainers];
+
+    // Coordinate with outstanding per-execution cleanup promises instead of
+    // duplicating kill/remove. A container whose cancellation cleanup has
+    // already started reuses that promise; one that has not is cleaned up now.
+    // Each item is a self-contained cleanup that never rejects, so a single
+    // failing command can never prevent the others from completing.
+    const shutdownCleanups = names.map(async (name) => {
+      let cleanup = this.getCancellationCleanupPromise(name);
+      if (!cleanup) {
+        cleanup = this._doKillAndRemove(name);
+        this.cleanupPromises.set(name, cleanup);
+      }
+      await cleanup;
+    });
+
+    const results = await Promise.allSettled(shutdownCleanups);
+
+    // Cleanup failures are observed through logs. They never prevent the
+    // removal attempt for another active container.
+    results.forEach((result, index) => {
+      if (result.status === "rejected") {
+        console.error(
+          "[docker-runtime] shutdown cleanup rejected",
+          { containerName: names[index], error: (result.reason as Error).message },
+        );
+      }
+    });
+
+    // Only clear tracking state once every coordinated cleanup has settled.
     this.activeContainers.clear();
+    this.cleanupPromises.clear();
   }
 
   private async runContainer(
@@ -170,14 +241,16 @@ export class DockerRuntime implements ExecutionRuntime {
       const abortHandler = () => {
         if (settled) return;
         aborted = true;
-        abortCleanup = (async () => {
-          await execFileAsync("docker", ["kill", containerName]).catch((e) =>
-            console.error("[docker-runtime] kill failed", { containerName, error: (e as Error).message }),
+        // Reuse the same cleanup promise if it already exists; otherwise
+        // create new. `_doKillAndRemove` logs each command failure so a
+        // kill/removal failure can never prevent the other step from running.
+        if (!this.cleanupPromises.has(containerName)) {
+          this.cleanupPromises.set(
+            containerName,
+            this._doKillAndRemove(containerName),
           );
-          await execFileAsync("docker", ["rm", "-f", containerName]).catch((e) =>
-            console.error("[docker-runtime] cleanup failed", { containerName, error: (e as Error).message }),
-          );
-        })();
+        }
+        abortCleanup = this.cleanupPromises.get(containerName) ?? null;
       };
       signal?.addEventListener("abort", abortHandler, { once: true });
 

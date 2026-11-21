@@ -1,0 +1,47 @@
+/**
+ * Job Engine — PostgreSQL integration tests: job cancellation.
+ *
+ * Exercises the full cancellation lifecycle: queued job cancellation,
+ * running job cancellation request, repeated cancellation, terminal
+ * job preservation, claim guard, attempt count invariants, and
+ * worker heartbeat interaction with cancellation.
+ *
+ * Run with: npm run test:integration   (brings up Postgres via docker compose first)
+ */
+
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { Pool } from "pg";
+import { randomUUID } from "node:crypto";
+import { truncateJobs, createTestPool } from "./helpers.js";
+import { JobRepository } from "../src/db/repository.js";
+import { JobService } from "../src/service/jobService.js";
+import { JobStatus } from "../src/domain/job.js";
+
+describe("job cancellation (PostgreSQL)", () => {
+  let pool: Pool;
+  let repo: JobRepository;
+
+  beforeEach(async () => {
+    pool = createTestPool();
+    repo = new JobRepository(pool);
+    await truncateJobs(pool);
+  });
+
+  afterEach(async () => {
+    await pool.end().catch(() => undefined);
+  });
+
+  /** Helper: insert a queued job and claim it as running. */
+  async function claimRunningJob(pool: Pool, workerId = "w1"): Promise<{ id: string; leaseGeneration: number }> {
+    const id = randomUUID();
+    await pool.query(
+      `INSERT INTO jobs (id, type, status, payload, created_at, updated_at)
+       VALUES ($1, 'sum_numbers', 'queued', $2, now(), now())`,
+      [id, JSON.stringify({})],
+    );
+    const claimed = await repo.claimNextJob(workerId, 30000);
+    if (!claimed) {
+      throw new Error("Failed to claim job");
+    }
+    return { id, leaseGeneration: claimed.leaseGeneration };
+  };
