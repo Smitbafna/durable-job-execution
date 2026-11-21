@@ -17,6 +17,20 @@ export interface CreateJobInput {
   readonly type: JobType;
   readonly payload: unknown;
   readonly maxAttempts?: number;
+  readonly idempotencyKey?: string;
+  readonly fingerprint?: string;
+}
+
+export interface IdempotencyKeyRow {
+  key: string;
+  fingerprint: string;
+  job_id: string;
+  created_at: Date;
+}
+
+export interface IdempotencyCheckResult {
+  job: Job | null;
+  keyExists: boolean;
 }
 
 /** Raw DB row (snake_case) produced by `SELECT * FROM jobs`. */
@@ -95,6 +109,20 @@ export class JobRepository {
       if (row === undefined) {
         // Should be unreachable for a RETURNING insert.
         throw new AppError(AppErrorCode.DbError, 500, "Job creation returned no row");
+      }
+      // Associate the job with its idempotency key if present
+      if (input.idempotencyKey !== undefined) {
+        await this.pool.query<
+          IdempotencyKeyRow
+        >(`INSERT INTO idempotency_keys (key, fingerprint, job_id, created_at)
+           VALUES ($1, $2, $3, now())
+           ON CONFLICT (key) DO NOTHING`,
+          [input.idempotencyKey, input.fingerprint, input.id],
+        );
+        await this.pool.query(
+          `UPDATE idempotency_keys SET job_id = $1 WHERE key = $2`,
+          [input.id, input.idempotencyKey],
+        );
       }
       return mapRow(row);
     } catch (e) {

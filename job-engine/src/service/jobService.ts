@@ -15,6 +15,32 @@ export interface SubmitJobCommand {
   readonly maxAttempts?: number;
 }
 
+function computeFingerprint(type: string, payload: unknown, maxAttempts?: number): string {
+  return canonicalStringify({ type, payload, maxAttempts });
+}
+
+function canonicalStringify(value: unknown): string {
+  if (value === null) return 'null';
+  if (typeof value === 'number') return String(value);
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  if (Array.isArray(value)) {
+    return '[' + value.map(canonicalStringify).join(',') + ']';
+  }
+  if (typeof value === 'object') {
+    // Recursive canonical JSON: sort keys at every level
+    if (Array.isArray(value)) {
+      return '[' + value.map(canonicalStringify).join(',') + ']';
+    }
+    // Sort keys at this level, then recursively sort nested objects
+    const sorted: Record<string, unknown> = {};
+    for (const k of Object.keys(value as Record<string, unknown>).sort()) {
+      sorted[k] = canonicalStringify((value as Record<string, unknown>)[k]);
+    }
+    return JSON.stringify(sorted);
+  }
+  return String(value);
+}
+
 export class JobService {
   constructor(
     private readonly repo: JobRepository,

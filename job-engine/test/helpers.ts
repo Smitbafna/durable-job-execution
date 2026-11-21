@@ -52,7 +52,7 @@ export function createMaintenancePool(): Pool {
 
 /** Removes all rows from `jobs` (called between tests via the shared pool). */
 export async function truncateJobs(pool: Pool): Promise<void> {
-  await pool.query("TRUNCATE TABLE jobs");
+  await pool.query("TRUNCATE TABLE idempotency_keys, jobs");
 }
 
 /** Removes all rows from `artifacts` (called between tests via the shared pool). */
