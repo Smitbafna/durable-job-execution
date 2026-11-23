@@ -280,4 +280,25 @@ describe("heartbeat deadline and late renewal", () => {
     (worker as any).stopHeartbeat(job.id);
     await promise.catch(() => undefined);
   });
+
+  it("stop does not persist shutdown before heartbeat update completes", async () => {
+    const repo = new FakeRepo();
+    // Hold the renewLease promise unresolved so _doStop() waits for it
+    let resolveRenew: ((v: boolean) => void) | undefined;
+    repo.renewImpl = () => new Promise<boolean>((resolve) => {
+      resolveRenew = resolve;
+    });
+    const worker = makeWorker(repo, 5);
+    worker.start();
+    // Call stop() while heartbeat is in-flight
+    await worker.stop();
+    // recordWorkerShutdown should NOT have been called yet because
+    // the heartbeat update is still pending
+    expect(repo.recordWorkerShutdownCalled).toBeUndefined();
+    // Now resolve the heartbeat update
+    resolveRenew?.(true);
+    // After the pending promise resolves, shutdown persistence should occur
+    await vi.advanceTimersByTimeAsync(100);
+    expect(repo.recordWorkerShutdownCalled).toBe(1);
+  });
 });

@@ -48,7 +48,14 @@ export class Worker {
   private readonly heartbeatStates = new Map<string, any>();
   private readonly ownershipLost = new Set<string>();
   private readonly abortControllers = new Map<string, AbortController>();
-  private readonly cancelledJobs = new Set<string>();
+  private readonly cancelledJobs = new Set<string>;
+  // Tracks the currently in-flight repo.renewLease() promise so that
+  // _doStop() can wait for it to complete before persisting shutdown.
+  private heartbeatUpdatePromise?: Promise<void>;
+  // Error state shared between the runtime cleanup and persistence try blocks
+  // in _doStop(), so that the four-combination error contract can be enforced.
+  private _runtimeError?: Error;
+  private _persistenceError?: Error;
   private retryPolicyConfig: RetryPolicyConfig = DEFAULT_RETRY_POLICY_CONFIG;
 
   constructor(
@@ -106,10 +113,57 @@ export class Worker {
    * Stops accepting new jobs and waits for every in-flight job to finish.
    */
   async stop(): Promise<void> {
-    if (this.stopping) return;
+    if (this.stopping) return this.shutdownPromise ?? Promise.resolve();
     this.stopping = true;
-    await Promise.allSettled(this.loops);
-    await this.runtimeRegistry?.shutdown?.();
+    this.shutdownPromise = this._doStop();
+    return this.shutdownPromise;
+  }
+
+  private async _doStop(): Promise<void> {
+    // Wait for any in-flight heartbeat repository update (renewLease) to
+    // complete before persisting shutdown, so that a running heartbeat does
+    // not persist after the worker has begun shutting down.
+    if (this.heartbeatUpdatePromise) {
+      await this.heartbeatUpdatePromise;
+    }
+    // Stop scheduling new heartbeats — the stopping flag prevents new jobs from
+    // being claimed, so startHeartbeat/scheduleHeartbeat will not be invoked for
+    // new work. Any in-flight heartbeat belongs to a job whose execution will
+    // complete via the running loops; we wait for loops to finish below.
+    try {
+      await Promise.allSettled(this.loops);
+      // Complete runtime cleanup.
+      await this.runtimeRegistry?.shutdown?.();
+    } catch (runtimeError) {
+      // Store the runtime cleanup error; we still attempt persistence below.
+      this._runtimeError = runtimeError instanceof Error ? runtimeError : new Error(String(runtimeError));
+    }
+    try {
+      // Persist worker shutdown — idempotent via the AND shutdown_at IS NULL guard.
+      // Always attempt persistence even if runtime cleanup fails, so that durable
+      // shutdown is not silently lost when cleanup encounters an error.
+      await this.repo.recordWorkerShutdown(this.config.workerId);
+    } catch (persistenceError) {
+      this._persistenceError = persistenceError instanceof Error ? persistenceError : new Error(String(persistenceError));
+    }
+    // Handle error combinations per the contract:
+    //   1. Both succeed → resolve (fall through)
+    //   2. Runtime cleanup fails, persistence succeeds → reject runtime error
+    //   3. Runtime cleanup succeeds, persistence fails → reject persistence error
+    //   4. Both fail → preserve both errors using AggregateError
+    // Do not allow a persistence error to mask a runtime cleanup error when both fail.
+    if (this._runtimeError && this._persistenceError) {
+      throw new AggregateError(
+        [this._runtimeError, this._persistenceError],
+        'Both runtime cleanup and shutdown persistence failed',
+      );
+    }
+    if (this._runtimeError) {
+      throw this._runtimeError;
+    }
+    if (this._persistenceError) {
+      throw this._persistenceError;
+    }
   }
 
   private async runLoop(): Promise<void> {
@@ -379,7 +433,20 @@ export class Worker {
   ): Promise<void> {
     if (state.stopped || state.inFlight) return;
     state.inFlight = true;
-    const renewalStartedAt = performance.now();
+    // Track the in-flight repo.renewLease() promise so that _doStop() can
+    // wait for it to complete before persisting shutdown.
+    this.heartbeatUpdatePromise = (async () => {
+      try {
+        if (performance.now() - state.lastRenewalStartedAt >= safetyWindowMs) {
+          this.failHeartbeat(job, state, \"lease safety deadline reached\");
+          return;
+        }
+        const renewal = await this.repo.renewLease(
+          job.id,
+          this.config.workerId,
+          job.leaseGeneration,
+          this.leaseConfig.leaseDurationMs,
+        );
     try {
       if (performance.now() - state.lastRenewalStartedAt >= safetyWindowMs) {
         this.failHeartbeat(job, state, "lease safety deadline reached");
@@ -442,9 +509,22 @@ export class Worker {
       }
       this.scheduleHeartbeat(job, state, backoffMs, safetyWindowMs, abortController);
     } finally {
+      // Clear the in-flight heartbeat update promise so that _doStop() can
+      // proceed past the await without blocking indefinitely.
+      this.heartbeatUpdatePromise = undefined;
       state.inFlight = false;
     }
   }
+  try {
+    await this.heartbeatUpdatePromise;
+  } finally {
+    // If the IIFE's finally already cleared the promise, skip.
+    if (this.heartbeatUpdatePromise) {
+      this.heartbeatUpdatePromise = undefined;
+      state.inFlight = false;
+    }
+  }
+}
 
   private scheduleHeartbeat(
     job: Job,
