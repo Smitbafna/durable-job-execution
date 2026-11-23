@@ -20,6 +20,7 @@ import { LocalArtifactStorage } from "./storage/localArtifactStorage.js";
 import type { ArtifactStorage } from "./storage/artifactStorage.js";
 import { loadArtifactConfig, type ArtifactConfig, loadExecutionConfig, type ExecutionConfig } from "./config.js";
 import { artifactRoutes } from "./http/artifactRoutes.js";
+import { workerRoutes } from "./http/workersRoutes.js";
 
 export interface CreateAppOptions {
   /** Inject a database pool (e.g. a test pool). Defaults to the env singleton. */
@@ -96,6 +97,7 @@ export function createApp(opts: CreateAppOptions = {}): AppContainer {
 
   app.use("/jobs", jobRoutes(service));
   app.use("/artifacts", artifactRoutes(artifactService, artifactConfig));
+  app.use("/workers", workerRoutes(repository));
   app.use(errorHandler);
 
   return {

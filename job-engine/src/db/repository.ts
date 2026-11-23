@@ -54,6 +54,15 @@ interface JobRow {
   cancellation_requested_at: Date | null;
 }
 
+/** Raw DB row (snake_case) produced by `SELECT * FROM workers`. */
+interface WorkerRow {
+  id: string;
+  type: string;
+  started_at: Date | null;
+  last_heartbeat_at: Date | null;
+  shutdown_at: Date | null;
+}
+
 /** Maps a raw DB row to the domain `Job` type. */
 function mapRow(row: JobRow): Job {
   return {
@@ -534,6 +543,38 @@ export class JobRepository {
     return res.rows[0].status === "queued"
       ? { status: "retry_scheduled" }
       : { status: "exhausted" };
+  }
+
+  /** Records the worker shutdown timestamp in the workers table. */
+  async recordWorkerShutdown(workerId: string): Promise<void> {
+    await this.pool.query(
+      `UPDATE workers SET shutdown_at = now() WHERE id = $1 AND shutdown_at IS NULL`,
+      [workerId],
+    );
+  }
+
+  /** Updates the worker's last heartbeat timestamp. */
+  async updateWorkerHeartbeat(workerId: string): Promise<void> {
+    await this.pool.query(
+      `UPDATE workers SET last_heartbeat_at = now() WHERE id = $1 AND shutdown_at IS NULL`,
+      [workerId],
+    );
+  }
+  /** Retrieves a worker by ID. */ async getWorker(workerId: string): Promise<WorkerRow | null> {
+    const res: QueryResult<WorkerRow> = await this.pool.query<WorkerRow>(
+      `SELECT id, type, started_at, last_heartbeat_at, shutdown_at FROM workers WHERE id = $1`,
+      [workerId],
+    );
+    if ((res.rows ?? []).length === 0) {
+      return null;
+    }
+    return (res.rows ?? [])[0];
+  }
+  /** Lists all workers ordered by started_at ASC. */ async listWorkers(): Promise<WorkerRow[]> {
+    const res: QueryResult<WorkerRow> = await this.pool.query<WorkerRow>(
+      `SELECT id, type, started_at, last_heartbeat_at, shutdown_at FROM workers ORDER BY started_at ASC`,
+    );
+    return res.rows ?? [];
   }
 }
 

@@ -69,15 +69,27 @@ export function validateSubmitJobRequest(
   return { type: b.type, payload: b.payload, maxAttempts: b.maxAttempts as number | undefined };
 }
 
-const UUID_V4_RE =
+/** Validates a worker ID using the project's UUID conventions. Returns the UUID string on success or an AppError (400) for malformed ids. */
+export function validateWorkerId(value: unknown): string | AppError {
+  if (typeof value !== "string" || !UUID_RE.test(value)) {
+    return new AppError(
+      AppErrorCode.ValidationError,
+      400,
+      "Worker id must be a UUID",
+    );
+  }
+  return value;
+}
+
+const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Validates a `GET /jobs/:id` path parameter. Returns the UUID string on
- * success or an `AppError` (400) for malformed ids.
+ * success or an AppError (400) for malformed ids.
  */
 export function validateJobId(value: unknown): string | AppError {
-  if (typeof value !== "string" || !UUID_V4_RE.test(value)) {
+  if (typeof value !== "string" || !UUID_RE.test(value)) {
     return new AppError(
       AppErrorCode.ValidationError,
       400,
