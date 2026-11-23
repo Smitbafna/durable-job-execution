@@ -1,4 +1,4 @@
-# ResumeDrop - Reliable WebRTC Foundation (Milestone 01)
+# ResumeDrop - Reliable WebRTC Foundation 
 
 **ResumeDrop** is a P2P file transfer foundation that enables direct browser-to-browser communication using WebRTC, with a WebSocket signaling server for connection setup and coordination.
 
@@ -10,39 +10,71 @@ The project is structured as an **npm workspace** with four packages that share 
 flowchart TD
     subgraph Shared["@resumedrop/shared"]
         direction LR
-        MS[Message Types] 
-        VA[Validators]
-        TG[Type Guards]
-    end
-
-    subgraph SignalingServer["@resumedrop/signaling-server"]
-        direction LR
-        SH[SignalingHub] 
-        WS[WebSocket Connections]
-        HR[HTTP /health endpoint]
+        MSG[Message Types]
+        VAL[Runtime Validators]
+        TYPES[Type Guards]
     end
 
     subgraph Frontend["@resumedrop/frontend"]
-        direction LR
-        RC[React Components] 
-        OR[useOrchestrator Hook]
-        PE[WebRTC Peer Logic]
-        UI[User Interface]
+        direction TB
+        UI[React UI]
+        ORCH[WebRTC Orchestrator]
+        SC[Signaling Client]
+        PEER[WebRTC Peer Connection]
+        DC[RTCDataChannel]
+
+        UI --> ORCH
+        ORCH --> SC
+        ORCH --> PEER
+        PEER --> DC
+    end
+
+    subgraph Signaling["@resumedrop/signaling-server"]
+        direction TB
+        WS[WebSocket Server]
+        HUB[Signaling Hub]
+        HEALTH[HTTP Health Endpoint]
+
+        WS <--> HUB
     end
 
     subgraph JobEngine["job-engine"]
-        direction LR
-        API[Express API Port 4700]
-        DB[(PostgreSQL Database)]
-        WR[Worker Processes]
-        AR[Artifact Storage]
+        direction TB
+        API[Express HTTP API :4700]
+        DB[(PostgreSQL)]
+        STORAGE[(Artifact Storage)]
+        WORKERS[Independent Worker Processes]
+        DOCKER[Docker Runtime Containers]
+
+        API <--> DB
+        API <--> STORAGE
+
+        WORKERS <--> DB
+        WORKERS <--> STORAGE
+        WORKERS --> DOCKER
     end
 
-    Shared --> SignalingServer
-    Shared --> Frontend
-    SignalingServer --> WS
-    Frontend --> SignalingServer
-    JobEngine --> DB
+    %% Shared package dependencies
+    Shared -.-> Frontend
+    Shared -.-> Signaling
+
+    %% Frontend signaling connection
+    SC <-->|WebSocket: presence, offers, answers, ICE| WS
+
+    %% Direct peer-to-peer communication
+    DC <-->|WebRTC DataChannel: peer messages and work data| REMOTE[Remote Peer]
+
+    %% Frontend to job execution backend
+    UI <-->|HTTP: submit jobs, upload artifacts, retrieve results| API
+
+    %% Styling relationships
+    classDef service fill:#e8f0fe,stroke:#4b78c2,color:#172b4d
+    classDef storage fill:#fff3d6,stroke:#c18b25,color:#543b0b
+    classDef runtime fill:#e5f5e9,stroke:#39834a,color:#174b26
+
+    class API,WS,HUB,ORCH,PEER service
+    class DB,STORAGE storage
+    class DOCKER,WORKERS runtime
 ```
 
 ### Package Structure
